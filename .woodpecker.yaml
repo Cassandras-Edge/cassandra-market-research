@@ -1,0 +1,56 @@
+when:
+  - event: [push, pull_request]
+
+steps:
+  # ── CI: tests (all branches, push + PR) ──
+
+  - name: backend-test
+    image: python:3.12-slim
+    when:
+      - event: [push, pull_request]
+    environment:
+      GITHUB_TOKEN:
+        from_secret: github_token
+    commands:
+      - apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
+      - printf "machine github.com\nlogin x-access-token\npassword $GITHUB_TOKEN\n" > /root/.netrc && chmod 600 /root/.netrc
+      - cd backend
+      - pip install -e ".[dev]"
+      - pytest
+
+  # ── Deploy: Docker image via BuildKit (push to main only) ──
+
+  - name: build-backend
+    image: moby/buildkit:v0.21.1
+    when:
+      - event: push
+        branch: main
+    environment:
+      AUTH_YAML_CONTENT:
+        from_secret: auth_yaml
+      GITHUB_TOKEN:
+        from_secret: github_token
+    commands:
+      - |
+        cat > /tmp/buildkitd.toml <<'TOML'
+        [registry."github.com"]
+          mirrors = ["github.com"]
+        TOML
+      - >
+        buildctl
+        --addr tcp://buildkitd.buildkitd.svc.cluster.local:1234
+        build
+        --frontend dockerfile.v0
+        --local context=backend
+        --local dockerfile=backend
+        --opt "build-arg:AUTH_YAML_CONTENT=$AUTH_YAML_CONTENT"
+        --secret id=github_token,env=GITHUB_TOKEN
+        --output type=image,name=172.20.0.161:30500/cassandra-fmp:latest,push=true,registry.insecure=true
+
+  - name: restart-deployment
+    image: bitnami/kubectl:latest
+    when:
+      - event: push
+        branch: main
+    commands:
+      - kubectl rollout restart deployment cassandra-fmp -n cassandra-fmp
