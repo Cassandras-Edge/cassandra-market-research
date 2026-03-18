@@ -509,16 +509,16 @@ class TestEarningsPreview:
 
         mcp, fmp = _make_server()
         async with Client(mcp) as c:
-            monkeypatch.setattr("tools.workflows._score_beat_rate", lambda *_: 1.0)
-            monkeypatch.setattr("tools.workflows._score_price_setup", lambda *_: 0.0)
-            monkeypatch.setattr("tools.workflows._score_analyst", lambda *_: 0.0)
-            monkeypatch.setattr("tools.workflows._score_insider", lambda *_: 0.0)
+            monkeypatch.setattr("cassandra_fmp.tools.workflows._score_beat_rate", lambda *_: 1.0)
+            monkeypatch.setattr("cassandra_fmp.tools.workflows._score_price_setup", lambda *_: 0.0)
+            monkeypatch.setattr("cassandra_fmp.tools.workflows._score_analyst", lambda *_: 0.0)
+            monkeypatch.setattr("cassandra_fmp.tools.workflows._score_insider", lambda *_: 0.0)
             bull = await c.call_tool("earnings_preview", {"symbol": "AAPL"})
 
-            monkeypatch.setattr("tools.workflows._score_beat_rate", lambda *_: -1.0)
+            monkeypatch.setattr("cassandra_fmp.tools.workflows._score_beat_rate", lambda *_: -1.0)
             bear = await c.call_tool("earnings_preview", {"symbol": "AAPL"})
 
-            monkeypatch.setattr("tools.workflows._score_beat_rate", lambda *_: 0.2)
+            monkeypatch.setattr("cassandra_fmp.tools.workflows._score_beat_rate", lambda *_: 0.2)
             neutral = await c.call_tool("earnings_preview", {"symbol": "AAPL"})
 
         assert bull.data["setup_signal"] == "BULLISH"
