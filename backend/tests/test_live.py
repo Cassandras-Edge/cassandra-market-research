@@ -256,7 +256,7 @@ CANONICAL_CASES = [
     _case("sec_filings_search", {"query": "SpaceX", "limit": 10}, ("query", "total_hits", "filings", "form_breakdown")),
 ]
 
-assert len(CANONICAL_CASES) == 64
+assert len(CANONICAL_CASES) == 63
 
 
 @pytest_asyncio.fixture
