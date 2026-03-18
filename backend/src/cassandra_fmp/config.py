@@ -20,8 +20,7 @@ class Settings:
 
 def load_settings() -> Settings:
     fmp_api_key = os.environ.get("FMP_API_KEY", "")
-    if not fmp_api_key:
-        raise RuntimeError("FMP_API_KEY is required")
+    # FMP_API_KEY can come from env or service credentials (fetched at server init)
 
     return Settings(
         fmp_api_key=fmp_api_key,

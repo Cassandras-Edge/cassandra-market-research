@@ -47,6 +47,25 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _fetch_service_credentials(settings: Settings) -> dict[str, str]:
+    """Fetch service-level credentials from auth service. Returns empty dict on failure."""
+    if not settings.auth_url or not settings.auth_secret:
+        return {}
+    import httpx  # noqa: PLC0415
+
+    try:
+        resp = httpx.get(
+            f"{settings.auth_url}/service-credentials/{SERVICE_ID}",
+            headers={"X-Auth-Secret": settings.auth_secret},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("credentials") or {}
+    except httpx.HTTPError:
+        logger.warning("Failed to fetch service credentials from auth service, using env vars")
+    return {}
+
+
 def create_mcp_server(settings: Settings) -> FastMCP:
     """Create and configure the FastMCP server with auth and all tools."""
 
@@ -56,6 +75,15 @@ def create_mcp_server(settings: Settings) -> FastMCP:
         service_id=SERVICE_ID,
     ) if settings.auth_url and settings.auth_secret else None
 
+    # Fetch service-level credentials (portal-managed), fall back to env vars
+    svc_creds = _fetch_service_credentials(settings)
+    fmp_api_key = svc_creds.get("FMP_API_KEY") or settings.fmp_api_key
+    polygon_api_key = svc_creds.get("POLYGON_API_KEY") or settings.polygon_api_key
+    fred_api_key = svc_creds.get("FRED_API_KEY") or settings.fred_api_key
+
+    if not fmp_api_key:
+        raise RuntimeError("FMP_API_KEY not set in portal service credentials or environment")
+
     rate_limit_config = RateLimitConfig(
         daily_limit=_env_int("FMP_DAILY_LIMIT", 1_000_000),
         requests_per_second=_env_int("FMP_REQUESTS_PER_SECOND", 30),
@@ -64,7 +92,7 @@ def create_mcp_server(settings: Settings) -> FastMCP:
 
     client = AsyncFMPDataClient(
         config=ClientConfig(
-            api_key=settings.fmp_api_key,
+            api_key=fmp_api_key,
             timeout=30,
             max_retries=3,
             rate_limit=rate_limit_config,
@@ -72,12 +100,12 @@ def create_mcp_server(settings: Settings) -> FastMCP:
     )
 
     treasury_client = TreasuryClient(
-        fred_api_key=settings.fred_api_key,
+        fred_api_key=fred_api_key,
     )
 
     polygon_client: PolygonClient | None = None
-    if settings.polygon_api_key:
-        polygon_client = PolygonClient(api_key=settings.polygon_api_key)
+    if polygon_api_key:
+        polygon_client = PolygonClient(api_key=polygon_api_key)
 
     @asynccontextmanager
     async def lifespan(server):
