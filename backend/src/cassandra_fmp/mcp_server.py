@@ -48,22 +48,21 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _fetch_service_credentials(settings: Settings) -> dict[str, str]:
-    """Fetch service-level credentials from auth service. Returns empty dict on failure."""
+    """Fetch service-level credentials from auth service."""
     if not settings.auth_url or not settings.auth_secret:
-        return {}
+        raise RuntimeError(
+            "AUTH_URL and AUTH_SECRET are required — service credentials are managed via the portal"
+        )
     import httpx  # noqa: PLC0415
 
-    try:
-        resp = httpx.get(
-            f"{settings.auth_url}/service-credentials/{SERVICE_ID}",
-            headers={"X-Auth-Secret": settings.auth_secret},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            return resp.json().get("credentials") or {}
-    except httpx.HTTPError:
-        logger.warning("Failed to fetch service credentials from auth service, using env vars")
-    return {}
+    resp = httpx.get(
+        f"{settings.auth_url}/service-credentials/{SERVICE_ID}",
+        headers={"X-Auth-Secret": settings.auth_secret},
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Failed to fetch service credentials: {resp.status_code}")
+    return resp.json().get("credentials") or {}
 
 
 def create_mcp_server(settings: Settings) -> FastMCP:
@@ -75,14 +74,14 @@ def create_mcp_server(settings: Settings) -> FastMCP:
         service_id=SERVICE_ID,
     ) if settings.auth_url and settings.auth_secret else None
 
-    # Fetch service-level credentials (portal-managed), fall back to env vars
+    # Fetch service-level credentials (portal-managed, no env var fallback)
     svc_creds = _fetch_service_credentials(settings)
-    fmp_api_key = svc_creds.get("FMP_API_KEY") or settings.fmp_api_key
-    polygon_api_key = svc_creds.get("POLYGON_API_KEY") or settings.polygon_api_key
-    fred_api_key = svc_creds.get("FRED_API_KEY") or settings.fred_api_key
+    fmp_api_key = svc_creds.get("FMP_API_KEY", "")
+    polygon_api_key = svc_creds.get("POLYGON_API_KEY") or None
+    fred_api_key = svc_creds.get("FRED_API_KEY") or None
 
     if not fmp_api_key:
-        raise RuntimeError("FMP_API_KEY not set in portal service credentials or environment")
+        raise RuntimeError("FMP_API_KEY not configured — set it in the portal under fmp → Service Settings")
 
     rate_limit_config = RateLimitConfig(
         daily_limit=_env_int("FMP_DAILY_LIMIT", 1_000_000),
