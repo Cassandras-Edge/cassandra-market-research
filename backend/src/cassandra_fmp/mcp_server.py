@@ -10,7 +10,7 @@ from fastmcp import FastMCP
 from fmp_data import AsyncFMPDataClient
 from fmp_data.config import ClientConfig, RateLimitConfig
 
-from cassandra_fmp.auth import McpKeyAuthProvider
+from cassandra_fmp.auth import McpKeyAuthProvider, build_auth
 from cassandra_fmp.clients.polygon import PolygonClient
 from cassandra_fmp.clients.treasury import TreasuryClient
 from cassandra_fmp.config import Settings
@@ -50,11 +50,26 @@ def _env_int(name: str, default: int) -> int:
 def create_mcp_server(settings: Settings) -> FastMCP:
     """Create and configure the FastMCP server with auth and all tools."""
 
-    auth_provider = McpKeyAuthProvider(
-        acl_url=settings.auth_url,
-        acl_secret=settings.auth_secret,
-        service_id=SERVICE_ID,
-    ) if settings.auth_url and settings.auth_secret else None
+    auth_provider = None
+    mcp_key_provider = None
+    if settings.auth_url and settings.auth_secret:
+        if settings.workos_client_id and settings.workos_client_secret and settings.workos_authkit_domain and settings.base_url:
+            auth_provider, mcp_key_provider = build_auth(
+                acl_url=settings.auth_url,
+                acl_secret=settings.auth_secret,
+                service_id=SERVICE_ID,
+                base_url=settings.base_url,
+                workos_client_id=settings.workos_client_id,
+                workos_client_secret=settings.workos_client_secret,
+                workos_authkit_domain=settings.workos_authkit_domain,
+            )
+        else:
+            mcp_key_provider = McpKeyAuthProvider(
+                acl_url=settings.auth_url,
+                acl_secret=settings.auth_secret,
+                service_id=SERVICE_ID,
+            )
+            auth_provider = mcp_key_provider
 
     # Service-level API keys from env vars (k8s Secrets)
     fmp_api_key = os.environ.get("FMP_API_KEY", "")
@@ -94,6 +109,8 @@ def create_mcp_server(settings: Settings) -> FastMCP:
         await treasury_client.close()
         if polygon_client is not None:
             await polygon_client.close()
+        if mcp_key_provider is not None:
+            mcp_key_provider.close()
 
     mcp_kwargs: dict = {
         "name": "Cassandra FMP",

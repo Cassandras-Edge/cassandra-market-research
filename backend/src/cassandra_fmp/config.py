@@ -13,6 +13,10 @@ class Settings:
     auth_yaml_path: str
     host: str
     mcp_port: int
+    base_url: str
+    workos_client_id: str
+    workos_client_secret: str
+    workos_authkit_domain: str
 
 
 def load_settings() -> Settings:
@@ -22,4 +26,8 @@ def load_settings() -> Settings:
         auth_yaml_path=os.environ.get("AUTH_YAML_PATH", "/app/acl.yaml"),
         host=os.environ.get("HOST", "0.0.0.0"),
         mcp_port=int(os.environ.get("MCP_PORT", "3003")),
+        base_url=os.environ.get("BASE_URL", ""),
+        workos_client_id=os.environ.get("WORKOS_CLIENT_ID", ""),
+        workos_client_secret=os.environ.get("WORKOS_CLIENT_SECRET", ""),
+        workos_authkit_domain=os.environ.get("WORKOS_AUTHKIT_DOMAIN", ""),
     )
