@@ -12,7 +12,10 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 
-RUN pip install --no-cache-dir "."
+ARG GITHUB_TOKEN=""
+RUN if [ -n "$GITHUB_TOKEN" ]; then printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > /root/.netrc && chmod 600 /root/.netrc; fi \
+    && pip install --no-cache-dir "." \
+    && rm -f /root/.netrc
 
 # Bundle auth policy for local enforcement (injected at build time)
 ARG AUTH_YAML_CONTENT=""
