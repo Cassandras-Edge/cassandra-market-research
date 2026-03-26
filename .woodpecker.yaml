@@ -45,7 +45,7 @@ steps:
         --local context=backend
         --local dockerfile=backend
         --opt "build-arg:AUTH_YAML_CONTENT=$AUTH_YAML_CONTENT"
-        --output type=image,name=172.20.0.161:30500/cassandra-fmp:latest,push=true,registry.insecure=true
+        --output type=image,name=172.20.0.161:30500/market-research:latest,push=true,registry.insecure=true
 
   - name: restart-deployment
     image: bitnami/kubectl:latest
@@ -53,4 +53,4 @@ steps:
       - event: push
         branch: main
     commands:
-      - kubectl rollout restart deployment cassandra-fmp -n production
+      - kubectl rollout restart deployment market-research -n production

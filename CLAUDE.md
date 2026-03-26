@@ -1,4 +1,4 @@
-# CLAUDE.md — Cassandra FMP
+# CLAUDE.md — Cassandra Market Research
 
 ## What This Is
 
@@ -7,7 +7,7 @@ Financial Market Data MCP server. Wraps FMP (Financial Modeling Prep), Polygon.i
 ## Repo Structure
 
 ```
-cassandra-fmp/
+cassandra-market-research/
 ├── backend/
 │   ├── src/cassandra_fmp/
 │   │   ├── main.py           # CLI entrypoint
@@ -35,7 +35,7 @@ Uses FastMCP sidecar pattern (Pattern 2):
 
 ## Deploy
 
-Backend auto-deploys on push to main via Woodpecker CI. BuildKit builds image, pushes to local registry, kubectl restarts the deployment. ArgoCD syncs the Helm chart from `cassandra-k8s/apps/cassandra-fmp/`.
+Backend auto-deploys on push to main via Woodpecker CI. BuildKit builds image, pushes to local registry, kubectl restarts the deployment. Helm chart in `cassandra-k8s/apps/market-research/`.
 
 ```bash
 # Manual local run
@@ -43,7 +43,7 @@ cd backend
 FMP_API_KEY=<key> uv run cassandra-fmp
 
 # Manual deploy (if needed)
-cd backend && docker build -t 172.20.0.161:30500/cassandra-fmp:latest . && docker push 172.20.0.161:30500/cassandra-fmp:latest
+cd backend && docker build -t 172.20.0.161:30500/market-research:latest . && docker push 172.20.0.161:30500/market-research:latest
 ```
 
 ## Env Vars

@@ -34,7 +34,7 @@ from cassandra_fmp.tools import (
 
 logger = logging.getLogger(__name__)
 
-SERVICE_ID = "fmp"
+SERVICE_ID = "market-research"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -47,24 +47,6 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _fetch_service_credentials(settings: Settings) -> dict[str, str]:
-    """Fetch service-level credentials from auth service."""
-    if not settings.auth_url or not settings.auth_secret:
-        raise RuntimeError(
-            "AUTH_URL and AUTH_SECRET are required — service credentials are managed via the portal"
-        )
-    import httpx  # noqa: PLC0415
-
-    resp = httpx.get(
-        f"{settings.auth_url}/service-credentials/{SERVICE_ID}",
-        headers={"X-Auth-Secret": settings.auth_secret},
-        timeout=10,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"Failed to fetch service credentials: {resp.status_code}")
-    return resp.json().get("credentials") or {}
-
-
 def create_mcp_server(settings: Settings) -> FastMCP:
     """Create and configure the FastMCP server with auth and all tools."""
 
@@ -74,14 +56,13 @@ def create_mcp_server(settings: Settings) -> FastMCP:
         service_id=SERVICE_ID,
     ) if settings.auth_url and settings.auth_secret else None
 
-    # Fetch service-level credentials (portal-managed, no env var fallback)
-    svc_creds = _fetch_service_credentials(settings)
-    fmp_api_key = svc_creds.get("FMP_API_KEY", "")
-    polygon_api_key = svc_creds.get("POLYGON_API_KEY") or None
-    fred_api_key = svc_creds.get("FRED_API_KEY") or None
+    # Service-level API keys from env vars (k8s Secrets)
+    fmp_api_key = os.environ.get("FMP_API_KEY", "")
+    polygon_api_key = os.environ.get("POLYGON_API_KEY") or None
+    fred_api_key = os.environ.get("FRED_API_KEY") or None
 
     if not fmp_api_key:
-        raise RuntimeError("FMP_API_KEY not configured — set it in the portal under fmp → Service Settings")
+        raise RuntimeError("FMP_API_KEY env var is required")
 
     rate_limit_config = RateLimitConfig(
         daily_limit=_env_int("FMP_DAILY_LIMIT", 1_000_000),
