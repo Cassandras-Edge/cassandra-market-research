@@ -49,9 +49,19 @@ steps:
         --output type=image,name=registry.infra.svc.cluster.local:5000/market-research:latest,push=true,registry.insecure=true
 
   - name: restart-deployment
-    image: bitnami/kubectl:latest
+    image: moby/buildkit:v0.21.1
     when:
       - event: push
         branch: main
     commands:
-      - kubectl rollout restart deployment market-research -n production
+      - |
+        TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+        APISERVER=https://kubernetes.default.svc
+        NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        wget -qO- \
+          --header="Authorization: Bearer $TOKEN" \
+          --header="Content-Type: application/strategic-merge-patch+json" \
+          --method=PATCH \
+          --body-data="{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"kubectl.kubernetes.io/restartedAt\":\"$NOW\"}}}}}" \
+          --no-check-certificate \
+          "$APISERVER/apis/apps/v1/namespaces/production/deployments/market-research"
