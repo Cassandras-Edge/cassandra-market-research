@@ -63,3 +63,29 @@ steps:
           -H "Content-Type: application/strategic-merge-patch+json" \
           -d "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"kubectl.kubernetes.io/restartedAt\":\"$NOW\"}}}}}" \
           "https://kubernetes.default.svc/apis/apps/v1/namespaces/production/deployments/market-research"
+
+  - name: notify-success
+    image: alpine/curl
+    when:
+      - status: success
+    environment:
+      DISCORD_WEBHOOK_URL:
+        from_secret: discord_webhook_url
+    commands:
+      - >
+        curl -sf -H "Content-Type: application/json"
+        -d "{\"embeds\":[{\"title\":\"✅ $CI_REPO #$CI_PIPELINE_NUMBER\",\"description\":\"**Branch:** $CI_COMMIT_BRANCH\n**Commit:** \`$(echo $CI_COMMIT_SHA | cut -c1-7)\`\",\"color\":3066993,\"url\":\"$CI_PIPELINE_URL\"}]}"
+        "$DISCORD_WEBHOOK_URL"
+
+  - name: notify-failure
+    image: alpine/curl
+    when:
+      - status: failure
+    environment:
+      DISCORD_WEBHOOK_URL:
+        from_secret: discord_webhook_url
+    commands:
+      - >
+        curl -sf -H "Content-Type: application/json"
+        -d "{\"embeds\":[{\"title\":\"❌ $CI_REPO #$CI_PIPELINE_NUMBER\",\"description\":\"**Branch:** $CI_COMMIT_BRANCH\n**Commit:** \`$(echo $CI_COMMIT_SHA | cut -c1-7)\`\",\"color\":15158332,\"url\":\"$CI_PIPELINE_URL\"}]}"
+        "$DISCORD_WEBHOOK_URL"
