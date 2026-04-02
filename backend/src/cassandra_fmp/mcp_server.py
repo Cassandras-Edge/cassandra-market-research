@@ -18,8 +18,10 @@ from cassandra_fmp.config import Settings
 from cassandra_fmp.tools import (
     assets,
     auctions,
+    cot,
     economy,
     edgar,
+    esg,
     financials,
     macro,
     market,
@@ -157,6 +159,8 @@ def create_mcp_server(settings: Settings) -> FastMCP:
     workflows.register(mcp, client)
     edgar.register(mcp, client)
     auctions.register(mcp, treasury_client)
+    cot.register(mcp)
+    esg.register(mcp)
     meta.register(mcp, client)
 
     if polygon_client is not None:
