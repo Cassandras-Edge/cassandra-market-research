@@ -7,6 +7,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastmcp import FastMCP
+from fastmcp.experimental.transforms.code_mode import CodeMode
 from fmp_data import AsyncFMPDataClient
 from fmp_data.config import ClientConfig, RateLimitConfig
 
@@ -129,6 +130,7 @@ def create_mcp_server(settings: Settings) -> FastMCP:
             "The filing is fetched once and each query is routed independently."
         ),
         "lifespan": lifespan,
+        "transforms": [CodeMode()],
     }
     if auth_provider:
         mcp_kwargs["auth"] = auth_provider
