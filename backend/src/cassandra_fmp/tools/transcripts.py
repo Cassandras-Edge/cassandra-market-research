@@ -30,6 +30,19 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient) -> None:
         max_chars: int | str = 100000,
         offset: int | str = 0,
     ) -> dict:
+        """Get full earnings call transcript text for a company.
+
+        Returns the complete transcript for a specific quarter, or the most
+        recent available. Use offset/max_chars for pagination on long transcripts.
+
+        Args:
+            symbol: Stock ticker symbol (e.g. 'AAPL').
+            year: Fiscal year (e.g. 2024). Omit for most recent.
+            quarter: Fiscal quarter (1-4). Omit for most recent.
+            latest_expected: If True, get the next expected transcript date.
+            max_chars: Max characters to return (default 100000). Use with offset for pagination.
+            offset: Character offset for pagination (default 0).
+        """
         symbol = symbol.upper().strip()
 
         def _to_int(v: int | str | None) -> int | None:

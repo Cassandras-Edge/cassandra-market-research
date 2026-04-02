@@ -26,6 +26,14 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient) -> None:
         symbol: str | None = None,
         limit: int = 10,
     ) -> dict:
+        """Get real-time commodity quotes (oil, gold, silver, nat gas, etc.).
+
+        Without a symbol, returns the top movers across all commodities.
+
+        Args:
+            symbol: Commodity symbol (e.g. 'GCUSD' for gold). Omit for batch overview.
+            limit: Max results for batch mode (default 10, max 50).
+        """
         return await _fetch_asset_quotes(client, "commodity", symbol, limit)
 
     @mcp.tool(
@@ -41,6 +49,14 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient) -> None:
         symbol: str | None = None,
         limit: int = 10,
     ) -> dict:
+        """Get real-time cryptocurrency quotes (BTC, ETH, SOL, etc.).
+
+        Without a symbol, returns the top movers across all crypto pairs.
+
+        Args:
+            symbol: Crypto pair (e.g. 'BTCUSD'). Omit for batch overview.
+            limit: Max results for batch mode (default 10, max 50).
+        """
         return await _fetch_asset_quotes(client, "crypto", symbol, limit)
 
     @mcp.tool(
@@ -56,6 +72,14 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient) -> None:
         symbol: str | None = None,
         limit: int = 10,
     ) -> dict:
+        """Get real-time foreign exchange quotes (EUR/USD, GBP/USD, USD/JPY, etc.).
+
+        Without a symbol, returns the top movers across all forex pairs.
+
+        Args:
+            symbol: Forex pair (e.g. 'EURUSD'). Omit for batch overview.
+            limit: Max results for batch mode (default 10, max 50).
+        """
         return await _fetch_asset_quotes(client, "forex", symbol, limit)
 
 

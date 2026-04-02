@@ -358,6 +358,29 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabC
         is_actively_trading: bool | None = None,
         limit: int = 20,
     ) -> dict:
+        """Search for stocks by name or screen by financial criteria.
+
+        Simple text queries search by company name. Adding any filter parameter
+        (sector, market_cap_min, etc.) activates the screener for filtered results.
+
+        Args:
+            query: Company name or keyword to search.
+            exchange: Filter by exchange (e.g. 'NYSE', 'NASDAQ').
+            sector: Filter by sector (e.g. 'Technology', 'Healthcare').
+            market_cap_min: Minimum market cap in dollars.
+            market_cap_max: Maximum market cap in dollars.
+            price_min: Minimum stock price.
+            price_max: Maximum stock price.
+            beta_min: Minimum beta.
+            beta_max: Maximum beta.
+            volume_min: Minimum daily volume.
+            dividend_yield_min: Minimum dividend yield.
+            dividend_yield_max: Maximum dividend yield.
+            country: Filter by country (e.g. 'US', 'GB').
+            is_etf: Filter to ETFs only (True) or exclude ETFs (False).
+            is_actively_trading: Filter to actively trading stocks only.
+            limit: Max results (default 20).
+        """
         use_screener = any(
             [
                 exchange,
@@ -443,6 +466,14 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabC
         }
     )
     async def company_executives(symbol: str) -> dict:
+        """Get company executives with compensation data and industry benchmarks.
+
+        Returns C-suite and board members with pay breakdown (salary, bonus,
+        stock awards, incentive plans) and industry compensation benchmarks.
+
+        Args:
+            symbol: Stock ticker symbol (e.g. 'AAPL').
+        """
         symbol = symbol.upper().strip()
         exec_data, comp_data, benchmark_data = await asyncio.gather(
             _safe_call(client.company.get_executives, symbol=symbol, ttl=TTL_DAILY, default=[]),
@@ -534,6 +565,14 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabC
         }
     )
     async def employee_history(symbol: str) -> dict:
+        """Get historical employee count with growth trends and CAGR.
+
+        Shows headcount over time from SEC filings, year-over-year changes,
+        and 5/10-year compound annual growth rates.
+
+        Args:
+            symbol: Stock ticker symbol (e.g. 'AAPL').
+        """
         symbol = symbol.upper().strip()
         data = await _safe_call(client.company.get_employee_count, symbol=symbol, ttl=TTL_DAILY, default=[])
         history_list = _as_list(data)
@@ -601,6 +640,15 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabC
         query: str | None = None,
         limit: int = 20,
     ) -> dict:
+        """Search delisted companies — stocks removed from exchanges.
+
+        Browse recently delisted companies or search by name/symbol.
+        Useful for tracking M&A completions, bankruptcies, and going-private transactions.
+
+        Args:
+            query: Optional search term to filter by symbol or company name.
+            limit: Max results (default 20).
+        """
         page = 0
         data = await _safe_endpoint_call(
             client,
@@ -658,6 +706,16 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabC
         form_type: str | None = None,
         limit: int = 20,
     ) -> dict:
+        """Get recent SEC filings for a company (10-K, 10-Q, 8-K, etc.).
+
+        Returns filing dates, form types, and links. Filter by form type
+        to narrow results (e.g. '10-K' for annual reports, '8-K' for current events).
+
+        Args:
+            symbol: Stock ticker symbol (e.g. 'AAPL').
+            form_type: Optional filter by SEC form type (e.g. '10-K', '10-Q', '8-K').
+            limit: Max results (default 20, max 100).
+        """
         symbol = symbol.upper().strip()
         limit = max(1, min(limit, 100))
         to_date = date.today()
@@ -708,6 +766,15 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabC
         query: str,
         type: str = "name",
     ) -> dict:
+        """Look up stock symbols by company name, CIK, or CUSIP.
+
+        Resolves identifiers to ticker symbols. Use type='cik' for SEC CIK
+        lookups or type='cusip' for CUSIP lookups.
+
+        Args:
+            query: Search term — company name, CIK number, or CUSIP.
+            type: Lookup type: 'name' (default), 'cik', or 'cusip'.
+        """
         type_lower = type.lower().strip()
         if type_lower == "cik":
             data = await _safe_call(client.market.search_by_cik, query=query, ttl=TTL_DAILY, default=[])
