@@ -23,6 +23,7 @@ from cassandra_fmp.tools import (
     edgar,
     esg,
     financials,
+    llm,
     macro,
     market,
     meta,
@@ -168,6 +169,7 @@ def create_mcp_server(settings: Settings) -> FastMCP:
     auctions.register(mcp, treasury_client)
     cot.register(mcp)
     esg.register(mcp)
+    llm.register(mcp)
     meta.register(mcp, client)
 
     if polygon_client is not None:
@@ -258,6 +260,8 @@ _TOOL_TAGS: dict[str, set[str]] = {
     # esg
     "esg_ratings": {"esg"},
     "esg_benchmark": {"esg"},
+    # llm
+    "analyze": {"analysis"},
     # meta
     "fmp_coverage_gaps": {"meta"},
     # options (polygon)
