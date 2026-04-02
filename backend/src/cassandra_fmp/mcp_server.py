@@ -7,7 +7,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastmcp import FastMCP
-from fastmcp.experimental.transforms.code_mode import CodeMode, MontySandboxProvider
+from fastmcp.experimental.transforms.code_mode import CodeMode, GetSchemas, GetTags, MontySandboxProvider, Search
 from fmp_data import AsyncFMPDataClient
 from fmp_data.config import ClientConfig, RateLimitConfig
 
@@ -134,6 +134,7 @@ def create_mcp_server(settings: Settings) -> FastMCP:
         "lifespan": lifespan,
         "transforms": [
             CodeMode(
+                discovery_tools=[GetTags(), Search(), GetSchemas()],
                 sandbox_provider=MontySandboxProvider(
                     limits={"max_duration_secs": 60},
                 ),
@@ -173,4 +174,122 @@ def create_mcp_server(settings: Settings) -> FastMCP:
         options.register(mcp, polygon_client=polygon_client)
         economy.register(mcp, polygon_client)
 
+    # Tag tools for Code Mode category discovery (GetTags)
+    _apply_tags(mcp)
+
     return mcp
+
+
+# Tool → tag mapping. Tags are the categories shown by GetTags discovery.
+_TOOL_TAGS: dict[str, set[str]] = {
+    # overview
+    "quote": {"price", "overview"},
+    "company_overview": {"overview"},
+    "stock_search": {"overview", "screening"},
+    "company_executives": {"overview"},
+    "employee_history": {"overview"},
+    "delisted_companies": {"overview"},
+    "sec_filings": {"overview", "sec"},
+    "symbol_lookup": {"overview"},
+    # financials
+    "financial_statements": {"financials"},
+    "financial_health": {"financials"},
+    "ratio_history": {"financials"},
+    "revenue_segments": {"financials"},
+    # valuation
+    "valuation_history": {"valuation"},
+    "discounted_cash_flow": {"valuation"},
+    "peer_comparison": {"valuation"},
+    # market
+    "intraday_prices": {"price", "market"},
+    "price_history": {"price", "market"},
+    "technical_indicators": {"market"},
+    "market_hours": {"market"},
+    # ownership
+    "institutional_ownership": {"ownership"},
+    "insider_activity": {"ownership"},
+    "short_interest": {"ownership"},
+    "ownership_structure": {"ownership"},
+    "senate_trading": {"ownership"},
+    # news
+    "market_news": {"news"},
+    # macro
+    "index_performance": {"macro", "market"},
+    "index_constituents": {"macro"},
+    "sector_performance": {"macro", "market"},
+    "industry_performance": {"macro"},
+    "sector_valuation": {"macro", "valuation"},
+    "market_overview": {"macro", "market"},
+    "economic_calendar": {"macro"},
+    "dividends_calendar": {"macro"},
+    "dividends_info": {"macro"},
+    "splits_calendar": {"macro"},
+    "ipo_calendar": {"macro"},
+    "mna_activity": {"macro"},
+    "treasury_rates": {"macro", "fixed-income"},
+    # transcripts
+    "earnings_transcript": {"earnings"},
+    "earnings_calendar": {"earnings"},
+    # assets
+    "commodity_quotes": {"price", "commodities"},
+    "crypto_quotes": {"price", "crypto"},
+    "forex_quotes": {"price", "forex"},
+    # workflows (high-level orchestration)
+    "stock_brief": {"workflow"},
+    "market_context": {"workflow"},
+    "earnings_setup": {"workflow", "earnings"},
+    "earnings_preview": {"workflow", "earnings"},
+    "earnings_postmortem": {"workflow", "earnings"},
+    "fair_value_estimate": {"workflow", "valuation"},
+    "ownership_deep_dive": {"workflow", "ownership"},
+    "industry_analysis": {"workflow", "macro"},
+    "estimate_revisions": {"workflow", "earnings"},
+    # edgar
+    "sec_filings_search": {"sec"},
+    "filing_sections": {"sec"},
+    "fund_holdings": {"sec", "ownership"},
+    "fund_search": {"sec"},
+    "fund_disclosure": {"sec", "ownership"},
+    # auctions / fixed income
+    "treasury_auctions": {"fixed-income"},
+    "auction_analysis": {"fixed-income"},
+    # cot
+    "cot_report": {"commodities", "fixed-income"},
+    # esg
+    "esg_ratings": {"esg"},
+    "esg_benchmark": {"esg"},
+    # meta
+    "fmp_coverage_gaps": {"meta"},
+    # options (polygon)
+    "options_chain": {"options"},
+    # economy (polygon)
+    "economy_indicators": {"macro"},
+    # fundraising
+    "crowdfunding_offerings": {"sec"},
+    "fundraising": {"sec"},
+    # historical
+    "historical_market_cap": {"market"},
+    "analyst_consensus": {"earnings", "valuation"},
+    # etf
+    "etf_lookup": {"overview"},
+}
+
+
+def _apply_tags(mcp: FastMCP) -> None:
+    """Apply category tags to all registered tools for Code Mode discovery."""
+    import asyncio
+
+    async def _tag_all() -> None:
+        for tool_name, tags in _TOOL_TAGS.items():
+            try:
+                tool = await mcp.get_tool(tool_name)
+                tool.tags.update(tags)
+            except Exception:
+                pass  # Tool may not exist (e.g. polygon not configured)
+
+    # Run in existing loop if available, otherwise create one
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_tag_all())
+    except RuntimeError:
+        asyncio.run(_tag_all())
