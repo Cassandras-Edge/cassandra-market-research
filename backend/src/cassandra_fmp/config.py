@@ -15,7 +15,6 @@ class Settings:
     mcp_port: int
     base_url: str
     workos_client_id: str
-    workos_client_secret: str
     workos_authkit_domain: str
 
 
@@ -28,6 +27,5 @@ def load_settings() -> Settings:
         mcp_port=int(os.environ.get("MCP_PORT", "3003")),
         base_url=os.environ.get("BASE_URL", ""),
         workos_client_id=os.environ.get("WORKOS_CLIENT_ID", ""),
-        workos_client_secret=os.environ.get("WORKOS_CLIENT_SECRET", ""),
         workos_authkit_domain=os.environ.get("WORKOS_AUTHKIT_DOMAIN", ""),
     )
