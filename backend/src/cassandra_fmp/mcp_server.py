@@ -141,7 +141,7 @@ def create_mcp_server(settings: Settings) -> FastMCP:
         "lifespan": lifespan,
     }
     if settings.code_mode:
-        mcp_kwargs["transforms"] = [DiscoveryTransform()]
+        mcp_kwargs["transforms"] = [DiscoveryTransform(service_id=SERVICE_ID)]
     acl_mw = AclMiddleware(service_id=SERVICE_ID, acl_path=settings.auth_yaml_path)
     if acl_mw._enabled:  # noqa: SLF001
         mcp_kwargs["middleware"] = [acl_mw]
