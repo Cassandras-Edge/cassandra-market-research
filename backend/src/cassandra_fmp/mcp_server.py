@@ -12,6 +12,7 @@ from fmp_data import AsyncFMPDataClient
 from fmp_data.config import ClientConfig, RateLimitConfig
 
 from cassandra_fmp.auth import McpKeyAuthProvider, build_auth
+from cassandra_mcp_auth import AclMiddleware
 from cassandra_fmp.clients.polygon import PolygonClient
 from cassandra_fmp.clients.treasury import TreasuryClient
 from cassandra_fmp.config import Settings
@@ -142,6 +143,10 @@ def create_mcp_server(settings: Settings) -> FastMCP:
                 ),
             ),
         ]
+    acl_mw = AclMiddleware(service_id=SERVICE_ID, acl_path=settings.auth_yaml_path)
+    if acl_mw._enabled:  # noqa: SLF001
+        mcp_kwargs["middleware"] = [acl_mw]
+
     if auth_provider:
         mcp_kwargs["auth"] = auth_provider
 
