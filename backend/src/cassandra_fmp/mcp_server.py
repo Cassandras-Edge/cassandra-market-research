@@ -132,15 +132,16 @@ def create_mcp_server(settings: Settings) -> FastMCP:
             "The filing is fetched once and each query is routed independently."
         ),
         "lifespan": lifespan,
-        "transforms": [
+    }
+    if settings.code_mode:
+        mcp_kwargs["transforms"] = [
             CodeMode(
                 discovery_tools=[GetTags(), Search(), GetSchemas()],
                 sandbox_provider=MontySandboxProvider(
                     limits={"max_duration_secs": 60},
                 ),
             ),
-        ],
-    }
+        ]
     if auth_provider:
         mcp_kwargs["auth"] = auth_provider
 
