@@ -7,7 +7,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastmcp import FastMCP
-from fastmcp.experimental.transforms.code_mode import CodeMode, GetSchemas, GetTags, MontySandboxProvider, Search
+from cassandra_mcp_auth import DiscoveryTransform
 from fmp_data import AsyncFMPDataClient
 from fmp_data.config import ClientConfig, RateLimitConfig
 
@@ -135,14 +135,7 @@ def create_mcp_server(settings: Settings) -> FastMCP:
         "lifespan": lifespan,
     }
     if settings.code_mode:
-        mcp_kwargs["transforms"] = [
-            CodeMode(
-                discovery_tools=[GetTags(), Search(), GetSchemas()],
-                sandbox_provider=MontySandboxProvider(
-                    limits={"max_duration_secs": 60},
-                ),
-            ),
-        ]
+        mcp_kwargs["transforms"] = [DiscoveryTransform()]
     acl_mw = AclMiddleware(service_id=SERVICE_ID, acl_path=settings.auth_yaml_path)
     if acl_mw._enabled:  # noqa: SLF001
         mcp_kwargs["middleware"] = [acl_mw]
