@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Financial Market Data MCP Server"
 requires-python = ">=3.12"
 dependencies = [
-    "cassandra-mcp-auth @ git+https://github.com/Cassandras-Edge/cassandra-auth.git@6d3e8a9#subdirectory=python",
+    "cassandra-mcp-auth @ git+https://github.com/Cassandras-Edge/cassandra-auth.git@8c8d8e7#subdirectory=python",
     "fastmcp[code-mode]>=3.2.0",
     "fmp-data==2.2.0",
     "httpx>=0.27.0",
