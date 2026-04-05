@@ -119,18 +119,24 @@ def create_mcp_server(settings: Settings) -> FastMCP:
     mcp_kwargs: dict = {
         "name": "Cassandra FMP",
         "instructions": (
-            "Financial data API. Start with workflow tools (stock_brief, market_context, "
-            "earnings_setup, earnings_preview, fair_value_estimate, earnings_postmortem, "
-            "ownership_deep_dive, industry_analysis) for common questions. "
-            "Use atomic tools for targeted queries. All tools are self-documenting. "
-            "For 'which funds hold [private company]?' questions (SpaceX, Anthropic, xAI, etc.), "
-            "use sec_filings_search with forms='NPORT-P' — this parses actual NPORT-P fund holdings "
-            "with position sizes, values, and portfolio weights via edgartools. "
-            "For reading SEC filing content (risk factors, MD&A, business description), "
-            "use filing_sections with query-based LLM filtering to extract only relevant paragraphs. "
-            "filing_sections accepts a `queries` list — pass ALL topics in one call "
-            "(e.g. queries=['tariffs trade policy', 'supply chain', 'export restrictions']). "
-            "The filing is fetched once and each query is routed independently."
+            "# Cassandra Market Research\n\n"
+            "Financial market data — stocks, SEC filings, macro, options, crypto, forex. "
+            "Wraps FMP (Financial Modeling Prep), Polygon.io, FRED, Treasury Fiscal Data, "
+            "and EDGAR fund holdings into one unified interface.\n\n"
+            "## When to use\n"
+            "- Stock prices, quotes, company fundamentals, analyst estimates\n"
+            "- SEC filings — 10-K risk factors, 8-Ks, NPORT-P fund holdings (e.g. 'who holds SpaceX?')\n"
+            "- Macro — index performance, sector rotation, economic calendar, treasury rates\n"
+            "- Earnings — transcripts, estimates, surprises, postmortems\n"
+            "- Options chains, crypto/forex/commodity quotes, ETF data\n\n"
+            "## Getting started\n"
+            "Workflow tools collapse common questions into one call: `stock_brief`, `market_context`, "
+            "`earnings_preview`, `fair_value_estimate`, `ownership_deep_dive`, `industry_analysis`. "
+            "Reach for workflows before atomic tools.\n\n"
+            "For SEC content, use `filing_sections` with a `queries` list — one fetch, multiple topics.\n\n"
+            "## Discovery\n"
+            "`tags()` → browse categories, `search(query, tags=[...])` → find tools, "
+            "`get_schema(tools=[...])` → see params. Execute via gateway `execute` tool."
         ),
         "lifespan": lifespan,
     }
