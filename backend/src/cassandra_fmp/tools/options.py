@@ -169,6 +169,11 @@ def _normalize_schwab_contracts(
     return contracts, underlying_price
 
 
+def _epoch_ms_to_date(ts: int) -> str:
+    """Convert epoch millis to YYYY-MM-DD."""
+    return datetime.utcfromtimestamp(ts / 1000).strftime("%Y-%m-%d")
+
+
 def register(
     mcp: FastMCP,
     *,
@@ -326,6 +331,98 @@ def register(
         return _build_chain_result(
             symbol, polygon_contracts, poly_underlying, source="polygon.io"
         )
+
+    if polygon_client is not None:
+        @mcp.tool(
+            annotations={
+                "title": "Historical Options",
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "openWorldHint": True,
+            }
+        )
+        async def historical_options(
+            option_ticker: str,
+            date_from: str,
+            date_to: str,
+            timespan: str = "day",
+            multiplier: int = 1,
+            symbol: str | None = None,
+            limit: int = 250,
+        ) -> dict:
+            """Get historical OHLCV price bars for an options contract.
+
+            Returns open, high, low, close, volume, VWAP, and trade count for each
+            bar in the date range. Use this for backtesting, charting option price
+            history, or analyzing how a specific contract traded over time.
+
+            Args:
+                option_ticker: Polygon option ticker (e.g. "O:AAPL250516C00220000").
+                    Format: O:{UNDERLYING}{YYMMDD}{C|P}{STRIKE*1000 zero-padded 8 digits}
+                date_from: Start date (YYYY-MM-DD)
+                date_to: End date (YYYY-MM-DD)
+                timespan: Bar size — "minute", "hour", "day", "week", "month" (default "day")
+                multiplier: Multiplier for timespan (e.g. 5 with "minute" = 5-min bars, default 1)
+                symbol: Optional underlying ticker for context in the response
+                limit: Max bars to return (default 250, max 5000)
+            """
+            option_ticker = option_ticker.strip()
+            if not option_ticker.startswith("O:"):
+                option_ticker = f"O:{option_ticker}"
+
+            _, from_err = _parse_iso_date(date_from, "date_from")
+            if from_err:
+                return {"error": from_err}
+            _, to_err = _parse_iso_date(date_to, "date_to")
+            if to_err:
+                return {"error": to_err}
+
+            valid_timespans = {"minute", "hour", "day", "week", "month"}
+            if timespan not in valid_timespans:
+                return {"error": f"Invalid timespan '{timespan}'. Use one of: {', '.join(sorted(valid_timespans))}"}
+
+            limit = max(1, min(limit, 5000))
+
+            data = await polygon_client.get_safe(
+                f"/v2/aggs/ticker/{option_ticker}/range/{multiplier}/{timespan}/{date_from}/{date_to}",
+                params={"adjusted": "true", "sort": "asc", "limit": limit},
+                cache_ttl=polygon_client.TTL_DAILY,
+            )
+
+            if not data or not isinstance(data, dict):
+                return {"error": f"No historical data found for '{option_ticker}'"}
+
+            results = data.get("results") or []
+            if not results:
+                return {
+                    "error": f"No bars found for '{option_ticker}' from {date_from} to {date_to}",
+                    "hint": "Check that the option ticker format is correct: O:AAPL250516C00220000",
+                }
+
+            bars = []
+            for bar in results:
+                bars.append({
+                    "date": _epoch_ms_to_date(bar["t"]),
+                    "open": bar.get("o"),
+                    "high": bar.get("h"),
+                    "low": bar.get("l"),
+                    "close": bar.get("c"),
+                    "volume": bar.get("v"),
+                    "vwap": bar.get("vw"),
+                    "trades": bar.get("n"),
+                })
+
+            return {
+                "option_ticker": option_ticker,
+                "symbol": symbol,
+                "timespan": f"{multiplier}{timespan}" if multiplier > 1 else timespan,
+                "date_from": date_from,
+                "date_to": date_to,
+                "bar_count": len(bars),
+                "bars": bars,
+                "source": "polygon.io",
+            }
 
 
 def _normalize_polygon_contracts(

@@ -287,6 +287,7 @@ _TOOL_TAGS: dict[str, set[str]] = {
     "fmp_coverage_gaps": {"meta"},
     # options (polygon)
     "options_chain": {"options"},
+    "historical_options": {"options"},
     # economy (polygon)
     "economy_indicators": {"macro"},
     # fundraising
