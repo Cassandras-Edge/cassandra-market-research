@@ -135,8 +135,11 @@ def create_mcp_server(settings: Settings) -> FastMCP:
             "Reach for workflows before atomic tools.\n\n"
             "For SEC content, use `filing_sections` with a `queries` list — one fetch, multiple topics.\n\n"
             "## Discovery\n"
-            "`tags()` → browse categories, `search(query, tags=[...])` → find tools, "
-            "`get_schema(tools=[...])` → see params. Execution happens on a SEPARATE server (cassandra-gateway). Do NOT call `execute` here — this server only has discovery tools. Look up tool names/schemas here, then switch to the gateway server to call `execute(code)` with `call_tool(name, args)`."
+            "`search(query)` → find tools (returns full JSON schemas by default), "
+            "`get_schema(tools=[...])` → get schemas for specific tools by name. "
+            "Pass `detail='brief'` for names only. Execution happens on a SEPARATE "
+            "server (cassandra-gateway) — look up schemas here, then call "
+            "`cass_gateway_run` with `call_tool(name, args)`."
         ),
         "lifespan": lifespan,
     }
