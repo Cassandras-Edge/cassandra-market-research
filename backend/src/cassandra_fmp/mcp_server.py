@@ -7,7 +7,13 @@ import os
 from contextlib import asynccontextmanager
 
 from fastmcp import FastMCP
-from cassandra_mcp_auth import DiscoveryTransform
+from fastmcp.experimental.transforms.code_mode import (
+    CodeMode,
+    GetSchemas,
+    GetTags,
+    MontySandboxProvider,
+    Search,
+)
 from fmp_data import AsyncFMPDataClient
 from fmp_data.config import ClientConfig, RateLimitConfig
 
@@ -117,7 +123,7 @@ def create_mcp_server(settings: Settings) -> FastMCP:
             mcp_key_provider.close()
 
     mcp_kwargs: dict = {
-        "name": "Cassandra FMP",
+        "name": "Cassandra Market Research",
         "instructions": (
             "# Cassandra Market Research\n\n"
             "Use this when the user wants financial data. This service covers the "
@@ -135,10 +141,8 @@ def create_mcp_server(settings: Settings) -> FastMCP:
             "`industry_analysis`. Reach for atomic tools only when workflows don't cover it.\n\n"
             "For SEC content, use `filing_sections` with a `queries` list — one fetch, "
             "multiple topics.\n\n"
-            "## How this works\n\n"
-            "This is a DISCOVERY server — it tells you what tools exist and how to "
-            "call them. To actually execute a tool, use the cassandra-gateway server.\n\n"
-            "### Step 1: Find tools (this server)\n"
+            "## How to use\n\n"
+            "### Find tools\n"
             "Call `cass_market_search` to look up tools and get their full parameter schemas.\n\n"
             "```\n"
             "cass_market_search(\n"
@@ -148,17 +152,33 @@ def create_mcp_server(settings: Settings) -> FastMCP:
             "  limit: int=None       # max results\n"
             ")\n"
             "```\n\n"
-            "### Step 2: Execute tools (cassandra-gateway server)\n"
-            "Take the tool name and params from step 1, then call `cass_gateway_run` "
-            "on the cassandra-gateway server:\n\n"
+            "### Execute tools\n"
+            "Use `cass_market_run` to execute tools via Python code with `call_tool()`:\n\n"
             "```\n"
-            "cass_gateway_run(code=\"return await call_tool('stock_brief', {'symbol': 'AAPL'})\")\n"
+            "cass_market_run(code=\"return await call_tool('stock_brief', {'symbol': 'AAPL'})\")\n"
+            "```\n\n"
+            "Chain multiple calls in one block for multi-step analysis:\n"
+            "```\n"
+            "cass_market_run(code=\"\"\"\n"
+            "brief = await call_tool('stock_brief', {'symbol': 'AAPL'})\n"
+            "earnings = await call_tool('earnings_preview', {'symbol': 'AAPL'})\n"
+            "return {'brief': brief, 'earnings': earnings}\n"
+            "\"\"\")\n"
             "```"
         ),
         "lifespan": lifespan,
+        "transforms": [
+            CodeMode(
+                sandbox_provider=MontySandboxProvider(limits={"max_duration_secs": 60}),
+                discovery_tools=[
+                    Search(name="cass_market_search", default_detail="full"),
+                    GetSchemas(name="cass_market_get_schema"),
+                    GetTags(name="cass_market_tags"),
+                ],
+                execute_tool_name="cass_market_run",
+            ),
+        ],
     }
-    if settings.code_mode:
-        mcp_kwargs["transforms"] = [DiscoveryTransform(service_id=SERVICE_ID)]
     acl_mw = AclMiddleware(service_id=SERVICE_ID, acl_path=settings.auth_yaml_path)
     if acl_mw._enabled:  # noqa: SLF001
         mcp_kwargs["middleware"] = [acl_mw]
