@@ -118,10 +118,13 @@ class ThetaDataClient:
     ) -> Any:
         """Make a GET request to ThetaTerminal v3.
 
-        Always forces ``format=json``. Returns the parsed JSON body.
-        Raises ThetaDataError on any non-2xx response.
+        Always forces ``format=json_new`` — the row-oriented response shape
+        (accounts created before 2025-10-31 default to ``json_legacy`` which
+        is columnar and would break our ``_flatten()`` parser). See
+        https://docs.thetadata.us/json-guide.html.
+        Returns the parsed JSON body. Raises ThetaDataError on any non-2xx.
         """
-        merged_params: dict[str, Any] = {"format": "json"}
+        merged_params: dict[str, Any] = {"format": "json_new"}
         if params:
             for k, v in params.items():
                 if v is None:
