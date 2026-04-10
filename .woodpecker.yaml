@@ -9,8 +9,11 @@ steps:
         from_secret: github_token
     commands:
       - mkdir -p .ci
-      - wget -qO .ci/build.sh --header "Authorization: token $GITHUB_TOKEN" https://raw.githubusercontent.com/Cassandras-Edge/cassandra-stack/main/scripts/ci-build.sh
-      - wget -qO .ci/notify.sh --header "Authorization: token $GITHUB_TOKEN" https://raw.githubusercontent.com/Cassandras-Edge/cassandra-stack/main/scripts/ci-notify.sh
+      # NOTE: the ": " inside the quoted Authorization header breaks YAML
+      # plain-scalar parsing (it turns the command into a map key). Keep
+      # these two lines wrapped in single quotes — do not unquote.
+      - 'wget -qO .ci/build.sh --header "Authorization: token $GITHUB_TOKEN" https://raw.githubusercontent.com/Cassandras-Edge/cassandra-stack/main/scripts/ci-build.sh'
+      - 'wget -qO .ci/notify.sh --header "Authorization: token $GITHUB_TOKEN" https://raw.githubusercontent.com/Cassandras-Edge/cassandra-stack/main/scripts/ci-notify.sh'
       - chmod +x .ci/build.sh .ci/notify.sh
 
   - name: test
