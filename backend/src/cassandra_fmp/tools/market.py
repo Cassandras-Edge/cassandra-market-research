@@ -398,10 +398,12 @@ def register(
         return result
 
     async def _fetch_options_oi(symbols: list[str]) -> dict[str, dict]:
-        """Fetch aggregate options OI for a list of symbols via ThetaData.
+        """Fetch aggregate options OI for a list of symbols via ThetaData v3.
 
         Returns {symbol: {total_oi, call_oi, put_oi, put_call_ratio}} for
-        each symbol where data is available.
+        each symbol where data is available. v3's snapshot_open_interest
+        supports ``expiration="*"`` so one call covers every contract on
+        every expiration for a symbol.
         """
         if not theta_client:
             return {}
@@ -410,41 +412,21 @@ def register(
 
         async def _get_oi(sym: str) -> tuple[str, dict | None]:
             async with sem:
-                # Pull all expirations and fan out OI snapshot requests.
-                # ThetaData Standard tier requires per-expiration calls; we
-                # cap at the next 8 expiries to keep this bounded for liquid
-                # underlyings.
-                expirations = await theta_client.list_expirations(sym)
-                if not expirations:
-                    return sym, None
-                today_str = date.today().strftime("%Y%m%d")
-                future = [e for e in expirations if e >= today_str][:8]
-                if not future:
-                    return sym, None
-
-                contracts = await theta_client.bulk_all_expirations(
-                    theta_client.bulk_snapshot_open_interest,
-                    sym,
-                    expirations=future,
-                    max_concurrency=4,
+                rows = await theta_client.snapshot_open_interest(
+                    symbol=sym, expiration="*",
                 )
 
-            if not contracts:
+            if not rows:
                 return sym, None
 
             call_oi = 0
             put_oi = 0
-            for entry in contracts:
-                contract_meta = entry.get("contract") or {}
-                right = (contract_meta.get("right") or "").upper()
-                ticks = entry.get("ticks") or []
-                if not ticks or not isinstance(ticks[0], list) or len(ticks[0]) < 2:
-                    continue
-                # open_interest is the second column in the bulk OI format
-                oi_value = ticks[0][1] or 0
-                if right == "C":
+            for entry in rows:
+                right = (entry.get("right") or "").upper()
+                oi_value = entry.get("open_interest") or 0
+                if right == "CALL":
                     call_oi += oi_value
-                elif right == "P":
+                elif right == "PUT":
                     put_oi += oi_value
             total = call_oi + put_oi
             if total == 0:

@@ -28,17 +28,15 @@ from tests.conftest import (
     POLYGON_SHORT_INTEREST,
     POLYGON_TREASURY_YIELDS,
     THETA_AAPL_EXPIRATIONS,
-    THETA_AAPL_GREEKS_20300220,
-    THETA_AAPL_GREEKS_20300227,
-    THETA_AAPL_QUOTE_20300220,
-    THETA_AAPL_QUOTE_20300227,
-    THETA_AAPL_OI_20300220,
-    THETA_AAPL_OI_20300227,
-    THETA_AAPL_OHLC_20300220,
-    THETA_AAPL_OHLC_20300227,
-    THETA_AAPL_STALE_GREEKS,
-    THETA_AAPL_STALE_QUOTE,
-    THETA_HIST_OHLC_AAPL_270C,
+    THETA_AAPL_GREEKS_FO,
+    THETA_AAPL_QUOTE_SNAPSHOT,
+    THETA_AAPL_OI_SNAPSHOT,
+    THETA_AAPL_OHLC_SNAPSHOT,
+    THETA_AAPL_STALE_GREEKS_FO,
+    THETA_AAPL_STALE_QUOTE_SNAPSHOT,
+    THETA_AAPL_STALE_OI_SNAPSHOT,
+    THETA_AAPL_STALE_OHLC_SNAPSHOT,
+    THETA_HIST_EOD_AAPL_270C,
 )
 
 BASE_FMP = "https://financialmodelingprep.com"
@@ -80,44 +78,24 @@ def _make_ownership_server(*, with_polygon: bool = True) -> tuple[FastMCP, Async
 
 
 def _mock_theta_chain(symbol: str = "AAPL") -> None:
-    """Wire up the four bulk_snapshot endpoints + list/expirations for AAPL."""
-    respx.get(f"{BASE_THETA}/v2/list/expirations").mock(
-        return_value=httpx.Response(200, json=THETA_AAPL_EXPIRATIONS)
+    """Wire up the four v3 snapshot endpoints for a symbol.
+
+    v3 supports ``expiration=*`` to fetch every contract on every expiry in
+    one call, so we only need four mocks total instead of a per-expiration
+    fan-out.
+    """
+    respx.get(f"{BASE_THETA}/v3/option/snapshot/greeks/first_order").mock(
+        return_value=httpx.Response(200, json=THETA_AAPL_GREEKS_FO)
     )
-    # 20300220 expiration
-    respx.get(
-        f"{BASE_THETA}/v2/bulk_snapshot/option/all_greeks",
-        params={"root": symbol, "exp": 20300220},
-    ).mock(return_value=httpx.Response(200, json=THETA_AAPL_GREEKS_20300220))
-    respx.get(
-        f"{BASE_THETA}/v2/bulk_snapshot/option/quote",
-        params={"root": symbol, "exp": 20300220},
-    ).mock(return_value=httpx.Response(200, json=THETA_AAPL_QUOTE_20300220))
-    respx.get(
-        f"{BASE_THETA}/v2/bulk_snapshot/option/open_interest",
-        params={"root": symbol, "exp": 20300220},
-    ).mock(return_value=httpx.Response(200, json=THETA_AAPL_OI_20300220))
-    respx.get(
-        f"{BASE_THETA}/v2/bulk_snapshot/option/ohlc",
-        params={"root": symbol, "exp": 20300220},
-    ).mock(return_value=httpx.Response(200, json=THETA_AAPL_OHLC_20300220))
-    # 20300227 expiration
-    respx.get(
-        f"{BASE_THETA}/v2/bulk_snapshot/option/all_greeks",
-        params={"root": symbol, "exp": 20300227},
-    ).mock(return_value=httpx.Response(200, json=THETA_AAPL_GREEKS_20300227))
-    respx.get(
-        f"{BASE_THETA}/v2/bulk_snapshot/option/quote",
-        params={"root": symbol, "exp": 20300227},
-    ).mock(return_value=httpx.Response(200, json=THETA_AAPL_QUOTE_20300227))
-    respx.get(
-        f"{BASE_THETA}/v2/bulk_snapshot/option/open_interest",
-        params={"root": symbol, "exp": 20300227},
-    ).mock(return_value=httpx.Response(200, json=THETA_AAPL_OI_20300227))
-    respx.get(
-        f"{BASE_THETA}/v2/bulk_snapshot/option/ohlc",
-        params={"root": symbol, "exp": 20300227},
-    ).mock(return_value=httpx.Response(200, json=THETA_AAPL_OHLC_20300227))
+    respx.get(f"{BASE_THETA}/v3/option/snapshot/quote").mock(
+        return_value=httpx.Response(200, json=THETA_AAPL_QUOTE_SNAPSHOT)
+    )
+    respx.get(f"{BASE_THETA}/v3/option/snapshot/open_interest").mock(
+        return_value=httpx.Response(200, json=THETA_AAPL_OI_SNAPSHOT)
+    )
+    respx.get(f"{BASE_THETA}/v3/option/snapshot/ohlc").mock(
+        return_value=httpx.Response(200, json=THETA_AAPL_OHLC_SNAPSHOT)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +134,6 @@ class TestOptionsChain:
         contracts_0220 = expirations[0]["contracts"]
         assert contracts_0220[0]["strike"] == 270.0
         assert contracts_0220[0]["greeks"]["delta"] == 0.55
-        assert contracts_0220[0]["greeks"]["gamma"] == 0.03
         assert contracts_0220[0]["iv"] == 0.32
         assert contracts_0220[0]["open_interest"] == 15000
         assert contracts_0220[0]["volume"] == 5200
@@ -189,9 +166,19 @@ class TestOptionsChain:
     @pytest.mark.asyncio
     @respx.mock
     async def test_no_data(self):
-        """Options chain returns error when symbol has no expirations."""
-        respx.get(f"{BASE_THETA}/v2/list/expirations").mock(
-            return_value=httpx.Response(200, json={"header": {"error_type": None}, "response": []})
+        """Options chain returns error when symbol has no contracts."""
+        empty = {"response": []}
+        respx.get(f"{BASE_THETA}/v3/option/snapshot/greeks/first_order").mock(
+            return_value=httpx.Response(200, json=empty)
+        )
+        respx.get(f"{BASE_THETA}/v3/option/snapshot/quote").mock(
+            return_value=httpx.Response(200, json=empty)
+        )
+        respx.get(f"{BASE_THETA}/v3/option/snapshot/open_interest").mock(
+            return_value=httpx.Response(200, json=empty)
+        )
+        respx.get(f"{BASE_THETA}/v3/option/snapshot/ohlc").mock(
+            return_value=httpx.Response(200, json=empty)
         )
 
         mcp, tc = _make_options_server()
@@ -278,37 +265,19 @@ class TestOptionsChain:
     @pytest.mark.asyncio
     @respx.mock
     async def test_stale_data_warning(self):
-        respx.get(f"{BASE_THETA}/v2/list/expirations").mock(
-            return_value=httpx.Response(200, json=THETA_AAPL_EXPIRATIONS)
+        """All-zero bid/ask across the chain should trip the stale-data warning."""
+        respx.get(f"{BASE_THETA}/v3/option/snapshot/greeks/first_order").mock(
+            return_value=httpx.Response(200, json=THETA_AAPL_STALE_GREEKS_FO)
         )
-        # All-zero bid/ask payloads on the first expiration
-        respx.get(
-            f"{BASE_THETA}/v2/bulk_snapshot/option/all_greeks",
-            params={"root": "AAPL", "exp": 20300220},
-        ).mock(return_value=httpx.Response(200, json=THETA_AAPL_STALE_GREEKS))
-        respx.get(
-            f"{BASE_THETA}/v2/bulk_snapshot/option/quote",
-            params={"root": "AAPL", "exp": 20300220},
-        ).mock(return_value=httpx.Response(200, json=THETA_AAPL_STALE_QUOTE))
-        respx.get(
-            f"{BASE_THETA}/v2/bulk_snapshot/option/open_interest",
-            params={"root": "AAPL", "exp": 20300220},
-        ).mock(return_value=httpx.Response(200, json={"header": {"error_type": None, "format": ["ms_of_day", "open_interest", "date"]}, "response": []}))
-        respx.get(
-            f"{BASE_THETA}/v2/bulk_snapshot/option/ohlc",
-            params={"root": "AAPL", "exp": 20300220},
-        ).mock(return_value=httpx.Response(200, json={"header": {"error_type": None, "format": ["ms_of_day", "open", "high", "low", "close", "volume", "count", "date"]}, "response": []}))
-        # Empty payloads for the second expiration so we focus the test on stale day-1
-        for path in (
-            "all_greeks",
-            "quote",
-            "open_interest",
-            "ohlc",
-        ):
-            respx.get(
-                f"{BASE_THETA}/v2/bulk_snapshot/option/{path}",
-                params={"root": "AAPL", "exp": 20300227},
-            ).mock(return_value=httpx.Response(200, json={"header": {"error_type": None}, "response": []}))
+        respx.get(f"{BASE_THETA}/v3/option/snapshot/quote").mock(
+            return_value=httpx.Response(200, json=THETA_AAPL_STALE_QUOTE_SNAPSHOT)
+        )
+        respx.get(f"{BASE_THETA}/v3/option/snapshot/open_interest").mock(
+            return_value=httpx.Response(200, json=THETA_AAPL_STALE_OI_SNAPSHOT)
+        )
+        respx.get(f"{BASE_THETA}/v3/option/snapshot/ohlc").mock(
+            return_value=httpx.Response(200, json=THETA_AAPL_STALE_OHLC_SNAPSHOT)
+        )
 
         mcp, tc = _make_options_server()
         async with Client(mcp) as c:
@@ -331,8 +300,9 @@ class TestHistoricalOptions:
     @pytest.mark.asyncio
     @respx.mock
     async def test_daily_bars_for_single_contract(self):
-        respx.get(f"{BASE_THETA}/v2/hist/option/ohlc").mock(
-            return_value=httpx.Response(200, json=THETA_HIST_OHLC_AAPL_270C)
+        """Day-mode hits /v3/option/history/eod and returns rich EOD bars."""
+        respx.get(f"{BASE_THETA}/v3/option/history/eod").mock(
+            return_value=httpx.Response(200, json=THETA_HIST_EOD_AAPL_270C)
         )
 
         mcp, tc = _make_options_server()
@@ -340,30 +310,64 @@ class TestHistoricalOptions:
             result = await c.call_tool(
                 "historical_options",
                 {
-                    "option_ticker": "O:AAPL300220C00270000",
+                    "symbol": "AAPL",
+                    "expiration": "2030-02-20",
+                    "strike": 270.0,
+                    "right": "call",
                     "date_from": "2030-02-18",
                     "date_to": "2030-02-20",
+                    "timespan": "day",
                 },
             )
 
         data = result.data
         assert data["source"] == "thetadata"
+        assert data["symbol"] == "AAPL"
+        assert data["strike"] == 270.0
+        assert data["right"] == "call"
         assert data["bar_count"] == 3
         assert data["bars"][0]["date"] == "2030-02-18"
         assert data["bars"][0]["close"] == 8.50
         assert data["bars"][0]["volume"] == 5200
+        assert data["bars"][0]["closing_bid"] == 8.45
+        assert data["bars"][0]["closing_ask"] == 8.55
         assert data["bars"][2]["close"] == 8.80
         await tc.close()
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_invalid_ticker(self):
+    async def test_invalid_right(self):
+        """Invalid 'right' rejects with error."""
         mcp, tc = _make_options_server()
         async with Client(mcp) as c:
             result = await c.call_tool(
                 "historical_options",
                 {
-                    "option_ticker": "GARBAGE",
+                    "symbol": "AAPL",
+                    "expiration": "2030-02-20",
+                    "strike": 270.0,
+                    "right": "straddle",
+                    "date_from": "2030-02-18",
+                    "date_to": "2030-02-20",
+                },
+            )
+        data = result.data
+        assert "error" in data
+        await tc.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_invalid_expiration(self):
+        """Invalid date format rejects with error."""
+        mcp, tc = _make_options_server()
+        async with Client(mcp) as c:
+            result = await c.call_tool(
+                "historical_options",
+                {
+                    "symbol": "AAPL",
+                    "expiration": "not-a-date",
+                    "strike": 270.0,
+                    "right": "call",
                     "date_from": "2030-02-18",
                     "date_to": "2030-02-20",
                 },
@@ -473,28 +477,18 @@ class TestEarningsCalendarOI:
     @pytest.mark.asyncio
     @respx.mock
     async def test_browse_includes_oi(self):
-        """Browsing mode enriches entries with options OI from ThetaData."""
+        """Browsing mode enriches entries with options OI from ThetaData v3."""
         respx.get(f"{BASE_FMP}/stable/earnings-calendar").mock(
             return_value=httpx.Response(200, json=EARNINGS_CALENDAR)
         )
         respx.get(f"{BASE_FMP}/stable/batch-quote").mock(
             return_value=httpx.Response(200, json=EARNINGS_BATCH_QUOTE)
         )
-        # ThetaData expirations + OI snapshot per symbol
-        for sym in ("AAPL", "MSFT", "GOOGL", "TSLA"):
-            respx.get(f"{BASE_THETA}/v2/list/expirations", params={"root": sym}).mock(
-                return_value=httpx.Response(200, json=THETA_AAPL_EXPIRATIONS)
-            )
-            for exp in (20300220, 20300227):
-                respx.get(
-                    f"{BASE_THETA}/v2/bulk_snapshot/option/open_interest",
-                    params={"root": sym, "exp": exp},
-                ).mock(
-                    return_value=httpx.Response(
-                        200,
-                        json=THETA_AAPL_OI_20300220 if exp == 20300220 else THETA_AAPL_OI_20300227,
-                    )
-                )
+        # v3 snapshot_open_interest supports expiration=* so one mock covers
+        # every symbol (respx returns the same fixture for all calls).
+        respx.get(f"{BASE_THETA}/v3/option/snapshot/open_interest").mock(
+            return_value=httpx.Response(200, json=THETA_AAPL_OI_SNAPSHOT)
+        )
 
         mcp, fmp, pc, tc = _make_market_server(with_polygon=False, with_theta=True)
         async with Client(mcp) as c:
@@ -517,17 +511,9 @@ class TestEarningsCalendarOI:
         respx.get(f"{BASE_FMP}/stable/earnings-calendar").mock(
             return_value=httpx.Response(200, json=EARNINGS_CALENDAR)
         )
-        respx.get(f"{BASE_THETA}/v2/list/expirations", params={"root": "AAPL"}).mock(
-            return_value=httpx.Response(200, json=THETA_AAPL_EXPIRATIONS)
+        respx.get(f"{BASE_THETA}/v3/option/snapshot/open_interest").mock(
+            return_value=httpx.Response(200, json=THETA_AAPL_OI_SNAPSHOT)
         )
-        respx.get(
-            f"{BASE_THETA}/v2/bulk_snapshot/option/open_interest",
-            params={"root": "AAPL", "exp": 20300220},
-        ).mock(return_value=httpx.Response(200, json=THETA_AAPL_OI_20300220))
-        respx.get(
-            f"{BASE_THETA}/v2/bulk_snapshot/option/open_interest",
-            params={"root": "AAPL", "exp": 20300227},
-        ).mock(return_value=httpx.Response(200, json=THETA_AAPL_OI_20300227))
 
         mcp, fmp, pc, tc = _make_market_server(with_polygon=False, with_theta=True)
         async with Client(mcp) as c:
@@ -536,7 +522,7 @@ class TestEarningsCalendarOI:
         data = result.data
         assert data["count"] == 1
         assert "options" in data["earnings"][0]
-        # Theta fixtures: calls OI = 15000+8000+6000=29000, puts OI = 12000
+        # v3 OI snapshot fixture: calls OI = 15000+8000+6000=29000, puts OI = 12000
         assert data["earnings"][0]["options"]["total_oi"] == 41000
         assert data["earnings"][0]["options"]["call_oi"] == 29000
         assert data["earnings"][0]["options"]["put_oi"] == 12000

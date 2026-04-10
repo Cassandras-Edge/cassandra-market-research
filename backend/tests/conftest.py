@@ -1104,184 +1104,197 @@ POLYGON_LABOR_MARKET = {
 }
 
 
-# --- ThetaData Fixtures ---
+# --- ThetaData v3 Fixtures ---
 #
-# These reproduce the same 4-contract scenario the legacy Polygon fixtures
-# used (2 expirations, AAPL, $270C/$270P/$280C and $275C). Dates are pinned
-# to 2030 so the "next 6 future expirations" filter in options_chain stays
-# satisfied for years.
-
-THETA_AAPL_EXPIRATIONS = {
-    "header": {"error_type": None, "format": ["expiration"]},
-    "response": ["20300220", "20300227"],
-}
-
-# Format for /v2/bulk_snapshot/option/all_greeks
-_GREEKS_FORMAT = [
-    "ms_of_day", "bid", "ask", "delta", "theta", "vega", "rho", "epsilon",
-    "lambda", "gamma", "vanna", "charm", "vomma", "veta", "speed", "zomma",
-    "color", "ultima", "implied_vol", "iv_error", "ms_of_day2",
-    "underlying_price", "date",
-]
+# v3 responses all share the same {"response": [{"contract": {...}, "data": [...]}]}
+# shape. Contract metadata (symbol/expiration/strike/right) lives in the
+# "contract" object; per-timestamp data lives as dicts in "data".
+#
+# These fixtures reproduce a 4-contract scenario across 2 expirations (AAPL
+# $270C/$270P/$280C expiring 2030-02-20 and $275C expiring 2030-02-27). Dates
+# are pinned to 2030 so the "next 6 future expirations" filter in
+# options_chain stays satisfied for years.
 
 
-def _greeks_tick(*, bid, ask, delta, gamma, theta, vega, iv, underlying):
-    """Build a single greeks-format tick row mirroring the docs example."""
-    row = [0] * len(_GREEKS_FORMAT)
-    row[_GREEKS_FORMAT.index("bid")] = bid
-    row[_GREEKS_FORMAT.index("ask")] = ask
-    row[_GREEKS_FORMAT.index("delta")] = delta
-    row[_GREEKS_FORMAT.index("theta")] = theta
-    row[_GREEKS_FORMAT.index("vega")] = vega
-    row[_GREEKS_FORMAT.index("gamma")] = gamma
-    row[_GREEKS_FORMAT.index("implied_vol")] = iv
-    row[_GREEKS_FORMAT.index("underlying_price")] = underlying
-    return row
-
-
-def _theta_contract(strike_dollars: float, right: str, expiration: int) -> dict:
+def _v3_contract(strike: float, right: str, expiration: str) -> dict:
+    """Build a v3 'contract' metadata object."""
     return {
-        "root": "AAPL",
+        "symbol": "AAPL",
         "expiration": expiration,
-        "strike": int(round(strike_dollars * 1000)),
-        "right": right,
+        "strike": round(float(strike), 3),
+        "right": right.upper(),
     }
 
 
-# Greeks payloads — one per expiration. The merge logic uses (exp, strike, right)
-# as the key, so we keep separate dicts per expiration to mirror real responses.
-THETA_AAPL_GREEKS_20300220 = {
-    "header": {"error_type": None, "format": _GREEKS_FORMAT},
+def _v3_wrap(entries: list[tuple[dict, list[dict]]]) -> dict:
+    """Wrap (contract, data-rows) pairs into a v3 response envelope."""
+    return {
+        "response": [
+            {"contract": contract, "data": data_rows}
+            for contract, data_rows in entries
+        ]
+    }
+
+
+# Expirations list endpoint — v3 flat shape
+THETA_AAPL_EXPIRATIONS = {
     "response": [
+        {"symbol": "AAPL", "expiration": "2030-02-20"},
+        {"symbol": "AAPL", "expiration": "2030-02-27"},
+    ],
+}
+
+# Greeks first-order snapshot (one payload for expiration=*, covers all 4 contracts)
+THETA_AAPL_GREEKS_FO = _v3_wrap([
+    (_v3_contract(270.0, "CALL", "2030-02-20"), [{
+        "timestamp": "2030-02-18T15:59:00",
+        "bid": 8.40, "ask": 8.60,
+        "delta": 0.55, "theta": -0.15, "vega": 0.25, "rho": 0.10, "epsilon": 0.0,
+        "lambda": 17.0, "implied_vol": 0.32, "iv_error": 0.0,
+        "underlying_timestamp": "2030-02-18T15:59:00", "underlying_price": 270.50,
+    }]),
+    (_v3_contract(270.0, "PUT", "2030-02-20"), [{
+        "timestamp": "2030-02-18T15:59:00",
+        "bid": 5.10, "ask": 5.30,
+        "delta": -0.45, "theta": -0.12, "vega": 0.22, "rho": -0.08, "epsilon": 0.0,
+        "lambda": -13.0, "implied_vol": 0.34, "iv_error": 0.0,
+        "underlying_timestamp": "2030-02-18T15:59:00", "underlying_price": 270.50,
+    }]),
+    (_v3_contract(280.0, "CALL", "2030-02-20"), [{
+        "timestamp": "2030-02-18T15:59:00",
+        "bid": 4.20, "ask": 4.40,
+        "delta": 0.35, "theta": -0.10, "vega": 0.20, "rho": 0.07, "epsilon": 0.0,
+        "lambda": 11.0, "implied_vol": 0.30, "iv_error": 0.0,
+        "underlying_timestamp": "2030-02-18T15:59:00", "underlying_price": 270.50,
+    }]),
+    (_v3_contract(275.0, "CALL", "2030-02-27"), [{
+        "timestamp": "2030-02-18T15:59:00",
+        "bid": 8.90, "ask": 9.10,
+        "delta": 0.50, "theta": -0.08, "vega": 0.30, "rho": 0.12, "epsilon": 0.0,
+        "lambda": 15.0, "implied_vol": 0.31, "iv_error": 0.0,
+        "underlying_timestamp": "2030-02-18T15:59:00", "underlying_price": 270.50,
+    }]),
+])
+
+THETA_AAPL_QUOTE_SNAPSHOT = _v3_wrap([
+    (_v3_contract(270.0, "CALL", "2030-02-20"), [{
+        "timestamp": "2030-02-18T15:59:00",
+        "bid_size": 100, "bid_exchange": 42, "bid": 8.40, "bid_condition": 50,
+        "ask_size": 150, "ask_exchange": 42, "ask": 8.60, "ask_condition": 50,
+    }]),
+    (_v3_contract(270.0, "PUT", "2030-02-20"), [{
+        "timestamp": "2030-02-18T15:59:00",
+        "bid_size": 80, "bid_exchange": 42, "bid": 5.10, "bid_condition": 50,
+        "ask_size": 120, "ask_exchange": 42, "ask": 5.30, "ask_condition": 50,
+    }]),
+    (_v3_contract(280.0, "CALL", "2030-02-20"), [{
+        "timestamp": "2030-02-18T15:59:00",
+        "bid_size": 60, "bid_exchange": 42, "bid": 4.20, "bid_condition": 50,
+        "ask_size": 90, "ask_exchange": 42, "ask": 4.40, "ask_condition": 50,
+    }]),
+    (_v3_contract(275.0, "CALL", "2030-02-27"), [{
+        "timestamp": "2030-02-18T15:59:00",
+        "bid_size": 50, "bid_exchange": 42, "bid": 8.90, "bid_condition": 50,
+        "ask_size": 70, "ask_exchange": 42, "ask": 9.10, "ask_condition": 50,
+    }]),
+])
+
+THETA_AAPL_OI_SNAPSHOT = _v3_wrap([
+    (_v3_contract(270.0, "CALL", "2030-02-20"),
+     [{"timestamp": "2030-02-18T06:30:00", "open_interest": 15000}]),
+    (_v3_contract(270.0, "PUT", "2030-02-20"),
+     [{"timestamp": "2030-02-18T06:30:00", "open_interest": 12000}]),
+    (_v3_contract(280.0, "CALL", "2030-02-20"),
+     [{"timestamp": "2030-02-18T06:30:00", "open_interest": 8000}]),
+    (_v3_contract(275.0, "CALL", "2030-02-27"),
+     [{"timestamp": "2030-02-18T06:30:00", "open_interest": 6000}]),
+])
+
+THETA_AAPL_OHLC_SNAPSHOT = _v3_wrap([
+    (_v3_contract(270.0, "CALL", "2030-02-20"), [{
+        "timestamp": "2030-02-18T15:59:00",
+        "open": 8.30, "high": 8.65, "low": 8.20, "close": 8.50,
+        "volume": 5200, "count": 410,
+    }]),
+    (_v3_contract(270.0, "PUT", "2030-02-20"), [{
+        "timestamp": "2030-02-18T15:59:00",
+        "open": 5.00, "high": 5.40, "low": 4.95, "close": 5.20,
+        "volume": 3800, "count": 290,
+    }]),
+    (_v3_contract(280.0, "CALL", "2030-02-20"), [{
+        "timestamp": "2030-02-18T15:59:00",
+        "open": 4.15, "high": 4.50, "low": 4.10, "close": 4.30,
+        "volume": 2100, "count": 170,
+    }]),
+    (_v3_contract(275.0, "CALL", "2030-02-27"), [{
+        "timestamp": "2030-02-18T15:59:00",
+        "open": 8.80, "high": 9.15, "low": 8.75, "close": 9.00,
+        "volume": 1500, "count": 120,
+    }]),
+])
+
+# Stale scenario — every contract shows $0 bid/ask so the warning test trips
+THETA_AAPL_STALE_GREEKS_FO = _v3_wrap([
+    (_v3_contract(250.0 + i, "CALL", "2030-02-20"), [{
+        "timestamp": "2030-02-18T15:59:00",
+        "bid": 0.0, "ask": 0.0,
+        "delta": 0.05, "theta": -0.01, "vega": 0.05, "rho": 0.0, "epsilon": 0.0,
+        "lambda": 0.0, "implied_vol": 0.30, "iv_error": 0.0,
+        "underlying_timestamp": "2030-02-18T15:59:00", "underlying_price": 270.50,
+    }])
+    for i in range(10)
+])
+
+THETA_AAPL_STALE_QUOTE_SNAPSHOT = _v3_wrap([
+    (_v3_contract(250.0 + i, "CALL", "2030-02-20"), [{
+        "timestamp": "2030-02-18T15:59:00",
+        "bid_size": 0, "bid": 0.0, "ask_size": 0, "ask": 0.0,
+    }])
+    for i in range(10)
+])
+
+THETA_AAPL_STALE_OI_SNAPSHOT = _v3_wrap([
+    (_v3_contract(250.0 + i, "CALL", "2030-02-20"),
+     [{"timestamp": "2030-02-18T06:30:00", "open_interest": 0}])
+    for i in range(10)
+])
+
+THETA_AAPL_STALE_OHLC_SNAPSHOT = _v3_wrap([
+    (_v3_contract(250.0 + i, "CALL", "2030-02-20"), [{
+        "timestamp": "2030-02-18T15:59:00",
+        "open": 0.0, "high": 0.0, "low": 0.0, "close": 0.0,
+        "volume": 0, "count": 0,
+    }])
+    for i in range(10)
+])
+
+
+# Historical EOD for a single contract — used by historical_options day-mode test
+THETA_HIST_EOD_AAPL_270C = _v3_wrap([
+    (_v3_contract(270.0, "CALL", "2030-02-20"), [
         {
-            "ticks": [_greeks_tick(bid=8.40, ask=8.60, delta=0.55, gamma=0.03, theta=-0.15, vega=0.25, iv=0.32, underlying=270.50)],
-            "contract": _theta_contract(270.0, "C", 20300220),
+            "created": "2030-02-18T17:15:00.000",
+            "last_trade": "2030-02-18T15:58:12.000",
+            "open": 8.40, "high": 8.65, "low": 8.30, "close": 8.50,
+            "volume": 5200, "count": 410,
+            "bid_size": 70, "bid_exchange": 60, "bid": 8.45, "bid_condition": 50,
+            "ask_size": 15, "ask_exchange": 47, "ask": 8.55, "ask_condition": 50,
         },
         {
-            "ticks": [_greeks_tick(bid=5.10, ask=5.30, delta=-0.45, gamma=0.03, theta=-0.12, vega=0.22, iv=0.34, underlying=270.50)],
-            "contract": _theta_contract(270.0, "P", 20300220),
+            "created": "2030-02-19T17:15:00.000",
+            "last_trade": "2030-02-19T15:58:11.000",
+            "open": 8.50, "high": 8.80, "low": 8.45, "close": 8.75,
+            "volume": 6100, "count": 470,
+            "bid_size": 90, "bid_exchange": 60, "bid": 8.70, "bid_condition": 50,
+            "ask_size": 20, "ask_exchange": 47, "ask": 8.80, "ask_condition": 50,
         },
         {
-            "ticks": [_greeks_tick(bid=4.20, ask=4.40, delta=0.35, gamma=0.04, theta=-0.10, vega=0.20, iv=0.30, underlying=270.50)],
-            "contract": _theta_contract(280.0, "C", 20300220),
+            "created": "2030-02-20T17:15:00.000",
+            "last_trade": "2030-02-20T15:58:10.000",
+            "open": 8.75, "high": 9.00, "low": 8.60, "close": 8.80,
+            "volume": 5900, "count": 455,
+            "bid_size": 100, "bid_exchange": 60, "bid": 8.75, "bid_condition": 50,
+            "ask_size": 30, "ask_exchange": 47, "ask": 8.85, "ask_condition": 50,
         },
-    ],
-}
-
-THETA_AAPL_GREEKS_20300227 = {
-    "header": {"error_type": None, "format": _GREEKS_FORMAT},
-    "response": [
-        {
-            "ticks": [_greeks_tick(bid=8.90, ask=9.10, delta=0.50, gamma=0.02, theta=-0.08, vega=0.30, iv=0.31, underlying=270.50)],
-            "contract": _theta_contract(275.0, "C", 20300227),
-        },
-    ],
-}
-
-# Quote payload format: bid_size + ask_size + last NBBO
-_QUOTE_FORMAT = [
-    "ms_of_day", "bid_size", "bid_exchange", "bid", "bid_condition",
-    "ask_size", "ask_exchange", "ask", "ask_condition", "date",
-]
-
-
-def _quote_tick(*, bid_size, bid, ask_size, ask):
-    row = [0] * len(_QUOTE_FORMAT)
-    row[_QUOTE_FORMAT.index("bid_size")] = bid_size
-    row[_QUOTE_FORMAT.index("bid")] = bid
-    row[_QUOTE_FORMAT.index("ask_size")] = ask_size
-    row[_QUOTE_FORMAT.index("ask")] = ask
-    return row
-
-
-THETA_AAPL_QUOTE_20300220 = {
-    "header": {"error_type": None, "format": _QUOTE_FORMAT},
-    "response": [
-        {"ticks": [_quote_tick(bid_size=100, bid=8.40, ask_size=150, ask=8.60)], "contract": _theta_contract(270.0, "C", 20300220)},
-        {"ticks": [_quote_tick(bid_size=80, bid=5.10, ask_size=120, ask=5.30)], "contract": _theta_contract(270.0, "P", 20300220)},
-        {"ticks": [_quote_tick(bid_size=60, bid=4.20, ask_size=90, ask=4.40)], "contract": _theta_contract(280.0, "C", 20300220)},
-    ],
-}
-
-THETA_AAPL_QUOTE_20300227 = {
-    "header": {"error_type": None, "format": _QUOTE_FORMAT},
-    "response": [
-        {"ticks": [_quote_tick(bid_size=50, bid=8.90, ask_size=70, ask=9.10)], "contract": _theta_contract(275.0, "C", 20300227)},
-    ],
-}
-
-# Open interest format: ["ms_of_day", "open_interest", "date"]
-def _oi_tick(oi: int) -> list:
-    return [0, oi, 0]
-
-
-THETA_AAPL_OI_20300220 = {
-    "header": {"error_type": None, "format": ["ms_of_day", "open_interest", "date"]},
-    "response": [
-        {"ticks": [_oi_tick(15000)], "contract": _theta_contract(270.0, "C", 20300220)},
-        {"ticks": [_oi_tick(12000)], "contract": _theta_contract(270.0, "P", 20300220)},
-        {"ticks": [_oi_tick(8000)], "contract": _theta_contract(280.0, "C", 20300220)},
-    ],
-}
-
-THETA_AAPL_OI_20300227 = {
-    "header": {"error_type": None, "format": ["ms_of_day", "open_interest", "date"]},
-    "response": [
-        {"ticks": [_oi_tick(6000)], "contract": _theta_contract(275.0, "C", 20300227)},
-    ],
-}
-
-# OHLC format: ["ms_of_day", "open", "high", "low", "close", "volume", "count", "date"]
-def _ohlc_tick(*, close: float, volume: int) -> list:
-    return [0, close, close, close, close, volume, 0, 0]
-
-
-THETA_AAPL_OHLC_20300220 = {
-    "header": {"error_type": None, "format": ["ms_of_day", "open", "high", "low", "close", "volume", "count", "date"]},
-    "response": [
-        {"ticks": [_ohlc_tick(close=8.50, volume=5200)], "contract": _theta_contract(270.0, "C", 20300220)},
-        {"ticks": [_ohlc_tick(close=5.20, volume=3800)], "contract": _theta_contract(270.0, "P", 20300220)},
-        {"ticks": [_ohlc_tick(close=4.30, volume=2100)], "contract": _theta_contract(280.0, "C", 20300220)},
-    ],
-}
-
-THETA_AAPL_OHLC_20300227 = {
-    "header": {"error_type": None, "format": ["ms_of_day", "open", "high", "low", "close", "volume", "count", "date"]},
-    "response": [
-        {"ticks": [_ohlc_tick(close=9.00, volume=1500)], "contract": _theta_contract(275.0, "C", 20300227)},
-    ],
-}
-
-# Stale-quote scenario for the warning test (all bid/ask are 0)
-THETA_AAPL_STALE_GREEKS = {
-    "header": {"error_type": None, "format": _GREEKS_FORMAT},
-    "response": [
-        {
-            "ticks": [_greeks_tick(bid=0, ask=0, delta=0.05, gamma=0.01, theta=-0.01, vega=0.05, iv=0.30, underlying=270.50)],
-            "contract": _theta_contract(250.0 + i, "C", 20300220),
-        }
-        for i in range(10)
-    ],
-}
-
-THETA_AAPL_STALE_QUOTE = {
-    "header": {"error_type": None, "format": _QUOTE_FORMAT},
-    "response": [
-        {"ticks": [_quote_tick(bid_size=0, bid=0, ask_size=0, ask=0)], "contract": _theta_contract(250.0 + i, "C", 20300220)}
-        for i in range(10)
-    ],
-}
-
-
-# Historical OHLC for a single contract — used by historical_options test
-THETA_HIST_OHLC_AAPL_270C = {
-    "header": {
-        "error_type": None,
-        "format": ["ms_of_day", "open", "high", "low", "close", "volume", "count", "date"],
-    },
-    "response": [
-        [34200000, 8.40, 8.65, 8.30, 8.50, 5200, 410, 20300218],
-        [34200000, 8.50, 8.80, 8.45, 8.75, 6100, 470, 20300219],
-        [34200000, 8.75, 9.00, 8.60, 8.80, 5900, 455, 20300220],
-    ],
-}
+    ]),
+])

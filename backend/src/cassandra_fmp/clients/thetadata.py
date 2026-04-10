@@ -1,16 +1,30 @@
-"""Async ThetaData REST client (talks to a ThetaTerminal sidecar over HTTP).
+"""Async ThetaData v3 REST client (talks to a ThetaTerminal v3 sidecar over HTTP).
 
 ThetaData has no cloud REST API — all requests go to a local ThetaTerminal
 process (Java) that authenticates against the ThetaData account on startup
-and exposes endpoints on http://127.0.0.1:25510 (or, in our k8s setup, the
+and exposes endpoints on http://127.0.0.1:25503 (or, in our k8s setup, the
 theta-terminal ClusterIP service).
 
-The client mirrors the ergonomics of clients/polygon.py: TTL cache, simple
-rate limiting, and a `get_safe()` variant that returns a default on error.
+This module targets ThetaData v3 (the v2 API was superseded; paths, params,
+and response shape all changed). v3 responses look like:
 
-Standard tier note: bulk_snapshot endpoints require a per-expiration `exp`
-argument. `bulk_all_expirations()` fans out across `/v2/list/expirations` so
-the same code paths work for both Standard and Pro tiers.
+    {
+      "response": [
+        {
+          "contract": {"symbol": "AAPL", "strike": 220.000,
+                       "right": "CALL", "expiration": "2024-11-08"},
+          "data": [
+            {"timestamp": "...", "open": 1.2, "high": 1.3, ...},
+            ...
+          ]
+        },
+        ...
+      ]
+    }
+
+The client flattens that into a plain ``list[dict]`` where each row carries
+the contract metadata merged with a single data dict. Tool code never touches
+the nested shape.
 """
 
 from __future__ import annotations
@@ -32,17 +46,15 @@ class ThetaDataError(Exception):
 
 
 class ThetaDataClient:
-    """Async HTTP client for the ThetaTerminal REST API.
+    """Async HTTP client for the ThetaTerminal v3 REST API.
 
-    All endpoints are served by a local ThetaTerminal process. In k8s the
+    All endpoints are served by a local ThetaTerminal v3 process. In k8s the
     terminal runs as a separate Deployment + ClusterIP Service; the URL is
     configured via THETA_TERMINAL_URL.
     """
 
-    DEFAULT_BASE_URL = "http://127.0.0.1:25510"
+    DEFAULT_BASE_URL = "http://127.0.0.1:25503"
 
-    # Rate limit between requests. ThetaTerminal is local so we keep this
-    # tiny — the bottleneck is wire latency to the sidecar, not throughput.
     MIN_INTERVAL = float(os.environ.get("THETA_MIN_INTERVAL", "0.0"))
 
     # Cache TTLs (seconds)
@@ -50,6 +62,14 @@ class ThetaDataClient:
     TTL_HOURLY = 3600
     TTL_6H = 21600
     TTL_DAILY = 86400
+
+    # ThetaData v3 allowed interval strings for history endpoints with an
+    # ``interval`` param. Tool code is allowed to pass anything here; we
+    # pass it through untouched.
+    VALID_INTERVALS = {
+        "tick", "10ms", "100ms", "500ms", "1s", "5s", "10s", "15s", "30s",
+        "1m", "5m", "10m", "15m", "30m", "1h",
+    }
 
     def __init__(self, base_url: str | None = None, timeout: float = 30.0):
         self.base_url = (base_url or self.DEFAULT_BASE_URL).rstrip("/")
@@ -86,18 +106,29 @@ class ThetaDataClient:
                 await asyncio.sleep(self.MIN_INTERVAL - elapsed)
             self._last_call = time.monotonic()
 
+    # ------------------------------------------------------------------
+    # Low-level GET + response flattening
+    # ------------------------------------------------------------------
+
     async def get(
         self,
         path: str,
         params: dict | None = None,
         cache_ttl: int = 60,
     ) -> Any:
-        """Make a GET request to ThetaTerminal.
+        """Make a GET request to ThetaTerminal v3.
 
-        Returns the parsed JSON body. Raises ThetaDataError if the
-        terminal reports an error in the response header.
+        Always forces ``format=json``. Returns the parsed JSON body.
+        Raises ThetaDataError on any non-2xx response.
         """
-        key = self._cache_key(path, params)
+        merged_params: dict[str, Any] = {"format": "json"}
+        if params:
+            for k, v in params.items():
+                if v is None:
+                    continue
+                merged_params[k] = v
+
+        key = self._cache_key(path, merged_params)
 
         if cache_ttl > 0 and key in self._cache:
             cached_at, data = self._cache[key]
@@ -107,7 +138,7 @@ class ThetaDataClient:
         await self._rate_limit()
 
         try:
-            resp = await self._get_client().get(path, params=params or {})
+            resp = await self._get_client().get(path, params=merged_params)
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             raise ThetaDataError(
@@ -117,13 +148,10 @@ class ThetaDataClient:
         except httpx.RequestError as e:
             raise ThetaDataError(f"Request to ThetaTerminal failed: {e}") from e
 
-        data = resp.json()
-
-        if isinstance(data, dict):
-            header = data.get("header") or {}
-            error_type = header.get("error_type") if isinstance(header, dict) else None
-            if error_type and error_type != "null":
-                raise ThetaDataError(f"ThetaData error: {error_type}")
+        try:
+            data = resp.json()
+        except ValueError as e:
+            raise ThetaDataError(f"ThetaData returned non-JSON body: {resp.text[:200]}") from e
 
         if cache_ttl > 0:
             self._cache[key] = (time.monotonic(), data)
@@ -143,157 +171,475 @@ class ThetaDataClient:
         except ThetaDataError:
             return default
 
+    @staticmethod
+    def _flatten(payload: Any) -> list[dict]:
+        """Flatten a v3 ``{"response": [{"contract": ..., "data": [...]}, ...]}``
+        payload into a flat list of dicts. Each row merges the contract metadata
+        (symbol/strike/right/expiration) with a single data entry.
+
+        Also handles flat list-of-dicts responses (used by list/expirations,
+        list/strikes, etc.) by returning them as-is.
+        """
+        if not isinstance(payload, dict):
+            return []
+        response = payload.get("response")
+        if not isinstance(response, list):
+            return []
+
+        out: list[dict] = []
+        for entry in response:
+            if not isinstance(entry, dict):
+                continue
+            # Flat shape (list/expirations, list/strikes, list/contracts)
+            if "contract" not in entry and "data" not in entry:
+                out.append(entry)
+                continue
+            # Nested shape with contract metadata + data rows
+            contract = entry.get("contract") or {}
+            data = entry.get("data") or []
+            if not isinstance(data, list):
+                continue
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                merged = dict(contract)
+                merged.update(row)
+                out.append(merged)
+        return out
+
+    async def _get_flat(
+        self,
+        path: str,
+        params: dict | None = None,
+        cache_ttl: int = 60,
+    ) -> list[dict]:
+        """Shortcut: GET + flatten. Returns [] on any error."""
+        payload = await self.get_safe(path, params=params, cache_ttl=cache_ttl)
+        return self._flatten(payload)
+
     # ------------------------------------------------------------------
     # Reference / discovery
     # ------------------------------------------------------------------
 
-    async def list_expirations(self, root: str) -> list[str]:
+    async def list_expirations(self, symbol: str) -> list[str]:
         """Return all known expiration dates (YYYYMMDD strings) for an underlying."""
-        data = await self.get_safe(
-            "/v2/list/expirations",
-            params={"root": root},
+        rows = await self._get_flat(
+            "/v3/option/list/expirations",
+            params={"symbol": symbol},
             cache_ttl=self.TTL_DAILY,
         )
-        if not data or not isinstance(data, dict):
-            return []
-        results = data.get("response") or []
-        return [str(d) for d in results if d]
+        out: list[str] = []
+        for r in rows:
+            exp = r.get("expiration")
+            if not exp:
+                continue
+            # v3 returns ISO dates ("2024-11-08") — normalize to YYYYMMDD
+            if isinstance(exp, str):
+                out.append(exp.replace("-", ""))
+        return sorted(set(out))
 
-    # ------------------------------------------------------------------
-    # Bulk snapshots (real-time, market-hours only)
-    # ------------------------------------------------------------------
-
-    async def bulk_snapshot_all_greeks(
-        self,
-        root: str,
-        exp: int,
-        cache_ttl: int = TTL_REALTIME,
-    ) -> dict | None:
-        """First-order Greeks + bid/ask + IV + underlying for one expiration."""
-        return await self.get_safe(
-            "/v2/bulk_snapshot/option/all_greeks",
-            params={"root": root, "exp": exp},
-            cache_ttl=cache_ttl,
+    async def list_strikes(self, symbol: str, expiration: str) -> list[float]:
+        """Return all known strikes (in dollars) for an underlying+expiration."""
+        rows = await self._get_flat(
+            "/v3/option/list/strikes",
+            params={"symbol": symbol, "expiration": expiration},
+            cache_ttl=self.TTL_DAILY,
         )
+        out: list[float] = []
+        for r in rows:
+            s = r.get("strike")
+            if isinstance(s, (int, float)):
+                out.append(float(s))
+        return sorted(set(out))
 
-    async def bulk_snapshot_quote(
+    async def list_contracts(
         self,
-        root: str,
-        exp: int,
-        cache_ttl: int = TTL_REALTIME,
-    ) -> dict | None:
-        """Bid/ask sizes for one expiration (sizes are not in all_greeks)."""
-        return await self.get_safe(
-            "/v2/bulk_snapshot/option/quote",
-            params={"root": root, "exp": exp},
-            cache_ttl=cache_ttl,
-        )
-
-    async def bulk_snapshot_open_interest(
-        self,
-        root: str,
-        exp: int,
-        cache_ttl: int = TTL_HOURLY,
-    ) -> dict | None:
-        """Open interest per contract for one expiration."""
-        return await self.get_safe(
-            "/v2/bulk_snapshot/option/open_interest",
-            params={"root": root, "exp": exp},
-            cache_ttl=cache_ttl,
-        )
-
-    async def bulk_snapshot_ohlc(
-        self,
-        root: str,
-        exp: int,
-        cache_ttl: int = TTL_REALTIME,
-    ) -> dict | None:
-        """Session OHLC + volume per contract for one expiration."""
-        return await self.get_safe(
-            "/v2/bulk_snapshot/option/ohlc",
-            params={"root": root, "exp": exp},
-            cache_ttl=cache_ttl,
-        )
-
-    async def bulk_all_expirations(
-        self,
-        fetcher,
-        root: str,
-        expirations: list[str] | None = None,
-        max_concurrency: int = 8,
+        request_type: str,
+        date: str,
+        symbol: str | None = None,
+        cache_ttl: int = TTL_6H,
     ) -> list[dict]:
-        """Fan out a `bulk_snapshot_*` call across multiple expirations.
+        """List all option contracts that had a trade or quote on a given date.
 
-        ThetaData's Standard tier requires an explicit `exp` per request, so
-        we list expirations and fan out. Returns a flat list of contract
-        objects ({"ticks": [...], "contract": {...}}).
+        request_type: "trade" or "quote".
+        date: YYYYMMDD.
+        symbol: optional comma-separated list of underlyings to filter by.
         """
-        if expirations is None:
-            expirations = await self.list_expirations(root)
-        if not expirations:
-            return []
-
-        sem = asyncio.Semaphore(max_concurrency)
-
-        async def _one(exp_str: str) -> list[dict]:
-            try:
-                exp_int = int(exp_str)
-            except (TypeError, ValueError):
-                return []
-            async with sem:
-                data = await fetcher(root, exp_int)
-            if not data or not isinstance(data, dict):
-                return []
-            response = data.get("response") or []
-            if not isinstance(response, list):
-                return []
-            return response
-
-        results = await asyncio.gather(*[_one(e) for e in expirations])
-        flat: list[dict] = []
-        for batch in results:
-            flat.extend(batch)
-        return flat
+        return await self._get_flat(
+            f"/v3/option/list/contracts/{request_type}",
+            params={"date": date, "symbol": symbol},
+            cache_ttl=cache_ttl,
+        )
 
     # ------------------------------------------------------------------
-    # Historical (single contract)
+    # Snapshots (real-time, for options_chain)
     # ------------------------------------------------------------------
 
-    async def hist_option_ohlc(
+    async def snapshot_greeks_first_order(
+        self,
+        symbol: str,
+        expiration: str = "*",
+        strike: str | None = None,
+        right: str | None = None,
+        strike_range: int | None = None,
+        max_dte: int | None = None,
+        cache_ttl: int = TTL_REALTIME,
+    ) -> list[dict]:
+        """Real-time delta/gamma/theta/vega + IV + bid/ask across contracts.
+
+        Passing ``expiration="*"`` returns every contract for every expiry in
+        one call — this is the v3 replacement for v2's per-expiration fan-out.
+        """
+        return await self._get_flat(
+            "/v3/option/snapshot/greeks/first_order",
+            params={
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": strike,
+                "right": right,
+                "strike_range": strike_range,
+                "max_dte": max_dte,
+            },
+            cache_ttl=cache_ttl,
+        )
+
+    async def snapshot_open_interest(
+        self,
+        symbol: str,
+        expiration: str = "*",
+        strike: str | None = None,
+        right: str | None = None,
+        strike_range: int | None = None,
+        max_dte: int | None = None,
+        cache_ttl: int = TTL_HOURLY,
+    ) -> list[dict]:
+        """Real-time open interest snapshot across contracts."""
+        return await self._get_flat(
+            "/v3/option/snapshot/open_interest",
+            params={
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": strike,
+                "right": right,
+                "strike_range": strike_range,
+                "max_dte": max_dte,
+            },
+            cache_ttl=cache_ttl,
+        )
+
+    async def snapshot_ohlc(
+        self,
+        symbol: str,
+        expiration: str = "*",
+        strike: str | None = None,
+        right: str | None = None,
+        strike_range: int | None = None,
+        max_dte: int | None = None,
+        cache_ttl: int = TTL_REALTIME,
+    ) -> list[dict]:
+        """Real-time session OHLCV snapshot across contracts."""
+        return await self._get_flat(
+            "/v3/option/snapshot/ohlc",
+            params={
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": strike,
+                "right": right,
+                "strike_range": strike_range,
+                "max_dte": max_dte,
+            },
+            cache_ttl=cache_ttl,
+        )
+
+    async def snapshot_quote(
+        self,
+        symbol: str,
+        expiration: str = "*",
+        strike: str | None = None,
+        right: str | None = None,
+        strike_range: int | None = None,
+        max_dte: int | None = None,
+        cache_ttl: int = TTL_REALTIME,
+    ) -> list[dict]:
+        """Real-time NBBO bid/ask + sizes snapshot across contracts."""
+        return await self._get_flat(
+            "/v3/option/snapshot/quote",
+            params={
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": strike,
+                "right": right,
+                "strike_range": strike_range,
+                "max_dte": max_dte,
+            },
+            cache_ttl=cache_ttl,
+        )
+
+    # ------------------------------------------------------------------
+    # Historical endpoints (single-contract queries)
+    # ------------------------------------------------------------------
+
+    async def history_eod(
         self,
         *,
-        root: str,
-        exp: int,
-        strike: int,
+        symbol: str,
+        expiration: str,
+        strike: str,
         right: str,
-        start_date: int,
-        end_date: int,
-        ivl_ms: int = 0,
-        rth: bool = True,
+        start_date: str,
+        end_date: str,
         cache_ttl: int = TTL_DAILY,
-    ) -> dict | None:
-        """Historical OHLC bars for a single option contract.
+    ) -> list[dict]:
+        """Daily EOD OHLCV + closing NBBO for a single contract across dates."""
+        return await self._get_flat(
+            "/v3/option/history/eod",
+            params={
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": strike,
+                "right": right,
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+            cache_ttl=cache_ttl,
+        )
 
-        Args:
-            strike: in 1/10 of a cent ($170.00 => 170000 * 1000 = 1700000).
-                ThetaData doc says "$170.00 strike price would be 170000",
-                meaning their "1/10 of a cent" is actually milli-dollars.
-            right: 'C' or 'P'.
-            ivl_ms: bar interval in milliseconds. 0 = tick-level, 60000 =
-                1min, 3600000 = 1h, 86400000 = 1d.
+    async def history_ohlc(
+        self,
+        *,
+        symbol: str,
+        expiration: str,
+        strike: str,
+        right: str,
+        start_date: str,
+        end_date: str,
+        interval: str = "1m",
+        start_time: str | None = None,
+        end_time: str | None = None,
+        cache_ttl: int = TTL_DAILY,
+    ) -> list[dict]:
+        """Intraday aggregated OHLC bars for a single contract.
+
+        Multi-day requests are limited to 1 month by the upstream API.
         """
-        params: dict[str, Any] = {
-            "root": root,
-            "exp": exp,
-            "strike": strike,
-            "right": right,
-            "start_date": start_date,
-            "end_date": end_date,
-            "ivl": ivl_ms,
-            "rth": "true" if rth else "false",
-        }
-        return await self.get_safe(
-            "/v2/hist/option/ohlc",
-            params=params,
+        return await self._get_flat(
+            "/v3/option/history/ohlc",
+            params={
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": strike,
+                "right": right,
+                "start_date": start_date,
+                "end_date": end_date,
+                "interval": interval,
+                "start_time": start_time,
+                "end_time": end_time,
+            },
+            cache_ttl=cache_ttl,
+        )
+
+    async def history_quote(
+        self,
+        *,
+        symbol: str,
+        expiration: str,
+        strike: str,
+        right: str,
+        start_date: str,
+        end_date: str,
+        interval: str = "1m",
+        start_time: str | None = None,
+        end_time: str | None = None,
+        cache_ttl: int = TTL_DAILY,
+    ) -> list[dict]:
+        """Intraday NBBO bid/ask snapshots for a single contract."""
+        return await self._get_flat(
+            "/v3/option/history/quote",
+            params={
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": strike,
+                "right": right,
+                "start_date": start_date,
+                "end_date": end_date,
+                "interval": interval,
+                "start_time": start_time,
+                "end_time": end_time,
+            },
+            cache_ttl=cache_ttl,
+        )
+
+    async def history_open_interest(
+        self,
+        *,
+        symbol: str,
+        expiration: str,
+        strike: str,
+        right: str,
+        start_date: str,
+        end_date: str,
+        cache_ttl: int = TTL_DAILY,
+    ) -> list[dict]:
+        """Historical daily open interest for a single contract."""
+        return await self._get_flat(
+            "/v3/option/history/open_interest",
+            params={
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": strike,
+                "right": right,
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+            cache_ttl=cache_ttl,
+        )
+
+    async def history_greeks_eod(
+        self,
+        *,
+        symbol: str,
+        expiration: str,
+        strike: str | None = None,
+        right: str | None = None,
+        start_date: str,
+        end_date: str,
+        cache_ttl: int = TTL_DAILY,
+    ) -> list[dict]:
+        """Daily EOD greeks (delta/gamma/theta/vega/IV) for single contract or chain.
+
+        Pass strike=None + right=None to use the default ``strike=*`` which
+        returns every contract on the expiration. Pass ``expiration="*"``
+        (with start_date == end_date) to get every contract on every expiration.
+        """
+        return await self._get_flat(
+            "/v3/option/history/greeks/eod",
+            params={
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": strike,
+                "right": right,
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+            cache_ttl=cache_ttl,
+        )
+
+    async def history_greeks_first_order(
+        self,
+        *,
+        symbol: str,
+        expiration: str,
+        strike: str,
+        right: str,
+        start_date: str,
+        end_date: str,
+        interval: str = "5m",
+        start_time: str | None = None,
+        end_time: str | None = None,
+        cache_ttl: int = TTL_DAILY,
+    ) -> list[dict]:
+        """Intraday first-order greeks (delta/gamma/theta/vega) + IV for a contract."""
+        return await self._get_flat(
+            "/v3/option/history/greeks/first_order",
+            params={
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": strike,
+                "right": right,
+                "start_date": start_date,
+                "end_date": end_date,
+                "interval": interval,
+                "start_time": start_time,
+                "end_time": end_time,
+            },
+            cache_ttl=cache_ttl,
+        )
+
+    async def history_greeks_implied_volatility(
+        self,
+        *,
+        symbol: str,
+        expiration: str,
+        strike: str,
+        right: str,
+        start_date: str,
+        end_date: str,
+        interval: str = "5m",
+        start_time: str | None = None,
+        end_time: str | None = None,
+        cache_ttl: int = TTL_DAILY,
+    ) -> list[dict]:
+        """Historical implied volatility (bid/mid/ask IV) for a contract."""
+        return await self._get_flat(
+            "/v3/option/history/greeks/implied_volatility",
+            params={
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": strike,
+                "right": right,
+                "start_date": start_date,
+                "end_date": end_date,
+                "interval": interval,
+                "start_time": start_time,
+                "end_time": end_time,
+            },
+            cache_ttl=cache_ttl,
+        )
+
+    # ------------------------------------------------------------------
+    # At-time endpoints (NBBO / IV at a specific second across dates)
+    # ------------------------------------------------------------------
+
+    async def at_time_quote(
+        self,
+        *,
+        symbol: str,
+        expiration: str,
+        strike: str,
+        right: str,
+        start_date: str,
+        end_date: str,
+        time_of_day: str,
+        cache_ttl: int = TTL_DAILY,
+    ) -> list[dict]:
+        """Last NBBO quote at a specific wall-clock time on each date in range."""
+        return await self._get_flat(
+            "/v3/option/at_time/quote",
+            params={
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": strike,
+                "right": right,
+                "start_date": start_date,
+                "end_date": end_date,
+                "time_of_day": time_of_day,
+            },
+            cache_ttl=cache_ttl,
+        )
+
+    async def at_time_trade(
+        self,
+        *,
+        symbol: str,
+        expiration: str,
+        strike: str,
+        right: str,
+        start_date: str,
+        end_date: str,
+        time_of_day: str,
+        cache_ttl: int = TTL_DAILY,
+    ) -> list[dict]:
+        """Last trade at a specific wall-clock time on each date in range."""
+        return await self._get_flat(
+            "/v3/option/at_time/trade",
+            params={
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": strike,
+                "right": right,
+                "start_date": start_date,
+                "end_date": end_date,
+                "time_of_day": time_of_day,
+            },
             cache_ttl=cache_ttl,
         )
