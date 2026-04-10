@@ -989,8 +989,8 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient) -> None:
             return {"error": f"Invalid days_ahead '{days_ahead}'. Must be >= 1."}
 
         setup, brief = await asyncio.gather(
-            earnings_setup.fn(symbol=symbol),
-            stock_brief.fn(symbol=symbol),
+            earnings_setup(symbol=symbol),
+            stock_brief(symbol=symbol),
         )
 
         setup_error = setup.get("error") if isinstance(setup, dict) else None

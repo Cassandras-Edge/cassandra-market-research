@@ -18,7 +18,6 @@ steps:
 
   - name: test
     image: ghcr.io/astral-sh/uv:python3.13-alpine
-    failure: ignore
     when:
       - event: [push, pull_request]
     environment:

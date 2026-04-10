@@ -39,7 +39,8 @@ class TestFMPCoverageGaps:
         assert isinstance(data["unimplemented_families"], list)
         assert isinstance(data["categories"], list)
         # Explicitly track key docs families we do not currently support.
-        assert "esg" in data["unimplemented_families"]
+        # Note: 'esg' was once here but is now implemented via tools/esg.py.
+        assert "bulk" in data["unimplemented_families"]
         assert "websocket" in data["unimplemented_families"]
         assert "senate-trading" not in data["unimplemented_families"]
         assert "discounted-cash-flow" not in data["unimplemented_families"]
