@@ -16,7 +16,12 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "Starting ThetaTerminal as user ${THETA_USERNAME}"
-java -jar /opt/theta/ThetaTerminal.jar "$THETA_USERNAME" "$THETA_PASSWORD" &
+# ThetaTerminal uses LMAX Disruptor ring buffers that allocate large
+# fixed-size arrays at startup; the JVM default heap (~256MB) is too
+# small. THETA_JVM_HEAP can override; default leaves headroom under
+# the k8s memory limit.
+JVM_HEAP="${THETA_JVM_HEAP:--Xmx1500m}"
+java $JVM_HEAP -jar /opt/theta/ThetaTerminal.jar "$THETA_USERNAME" "$THETA_PASSWORD" &
 
 echo "Starting socat proxy 0.0.0.0:25511 → 127.0.0.1:25510"
 socat TCP-LISTEN:25511,fork,reuseaddr TCP:127.0.0.1:25510 &
