@@ -57,7 +57,7 @@ FMP_API_KEY=<key> THETA_TERMINAL_URL=http://127.0.0.1:25510 uv run cassandra-fmp
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `FMP_API_KEY` | Yes | Financial Modeling Prep API key |
-| `THETA_TERMINAL_URL` | Yes (for options) | URL of the ThetaTerminal REST endpoint (e.g. `http://theta-terminal.production.svc.cluster.local:25510`) |
+| `THETA_TERMINAL_URL` | Yes (for options) | URL of the ThetaTerminal v3 REST endpoint (e.g. `http://theta-terminal.production.svc.cluster.local:25503`) |
 | `POLYGON_API_KEY` | No | Polygon.io API key — enables MACD, Polygon short-volume enrichment, and `economy_indicators` (Fed series). NOT options. |
 | `FRED_API_KEY` | No | FRED API key (enables CMT yield data in treasury tools) |
 | `AUTH_URL` | Yes (prod) | ACL service URL for key validation |
@@ -66,13 +66,13 @@ FMP_API_KEY=<key> THETA_TERMINAL_URL=http://127.0.0.1:25510 uv run cassandra-fmp
 | `HOST` | No | Bind address (default: 0.0.0.0) |
 | `MCP_PORT` | No | Port (default: 3003) |
 
-## ThetaData / ThetaTerminal
+## ThetaData / ThetaTerminal v3
 
-`options_chain`, `historical_options`, and the OI enrichment in `earnings_calendar` all talk to a separate `theta-terminal` Deployment that runs ThetaTerminal.jar. The terminal binds the REST API to `127.0.0.1:25510` only, so the sidecar image runs `socat TCP-LISTEN:25511 → TCP:127.0.0.1:25510` to expose it on a ClusterIP Service.
+All options tools talk to a separate `theta-terminal` Deployment running `ThetaTerminalv3.jar` (from `download-unstable.thetadata.us` — v3 is still in beta). The terminal binds the REST API to `127.0.0.1:25503` only, so the sidecar image runs `socat TCP-LISTEN:25511 → TCP:127.0.0.1:25503` to expose it on a ClusterIP Service.
 
-ThetaData credentials are stored in the `theta-terminal` k8s Secret (`THETA_USERNAME`, `THETA_PASSWORD`) and consumed only by the sidecar at startup. The market-research backend never sees them — it just talks to the local URL.
+v3 credentials are written to a `creds.txt` file (email on line 1, password on line 2) at startup from `THETA_USERNAME`/`THETA_PASSWORD` k8s Secret env vars — positional-arg credentials are no longer accepted.
 
-For Standard-tier accounts the client lists expirations first, then fans out per-expiration `bulk_snapshot` calls. The `options_chain` tool defaults to the next 6 future expirations when no `expiry_from`/`expiry_to` is supplied to keep the request budget bounded for liquid underlyings like SPY.
+v3's `snapshot/greeks/first_order`, `snapshot/quote`, `snapshot/open_interest`, and `snapshot/ohlc` all accept `expiration=*` to fetch every contract on every expiration in a single call, so `options_chain` no longer fans out per-expiration. It still defaults to the next ~6 future expirations (client-side filter) when no `expiry_from`/`expiry_to` is supplied, to keep the result size bounded for liquid underlyings like SPY.
 
 ## Tool Modules
 
@@ -91,5 +91,5 @@ All tools are read-only financial data queries. Each module exports a `register(
 - `edgar` — SEC filings search, filing_sections (LLM-filtered), fund holdings (NPORT-P)
 - `auctions` — Treasury auction data
 - `meta` — fmp_coverage_gaps
-- `options` — options_chain, historical_options (requires ThetaData)
+- `options` — options_chain, historical_options, historical_option_iv, historical_option_greeks, historical_option_oi, option_quote_at_time (requires ThetaData v3)
 - `economy` — economy_indicators (requires Polygon)
