@@ -16,6 +16,7 @@ class Settings:
     base_url: str
     workos_client_id: str
     workos_authkit_domain: str
+    theta_terminal_url: str
 
 
 def load_settings() -> Settings:
@@ -28,4 +29,5 @@ def load_settings() -> Settings:
         base_url=os.environ.get("BASE_URL", ""),
         workos_client_id=os.environ.get("WORKOS_CLIENT_ID", ""),
         workos_authkit_domain=os.environ.get("WORKOS_AUTHKIT_DOMAIN", ""),
+        theta_terminal_url=os.environ.get("THETA_TERMINAL_URL", ""),
     )

@@ -1,4 +1,4 @@
-"""Tests for Polygon.io-backed tools: options, MACD, economy, short volume."""
+"""Tests for upstream-data-backed tools: options (ThetaData), MACD, economy, short volume (Polygon)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ import respx
 from fastmcp import FastMCP, Client
 from fmp_data import AsyncFMPDataClient
 from cassandra_fmp.clients.polygon import PolygonClient
-from tests.conftest import build_test_client
+from cassandra_fmp.clients.thetadata import ThetaDataClient
+from tests.conftest import build_test_client, THETA_TEST_URL
 from cassandra_fmp.tools.options import register as register_options
 from cassandra_fmp.tools.economy import register as register_economy
 from cassandra_fmp.tools.market import register as register_market
@@ -24,20 +25,32 @@ from tests.conftest import (
     POLYGON_INFLATION_EXPECTATIONS,
     POLYGON_LABOR_MARKET,
     POLYGON_MACD,
-    POLYGON_OPTIONS_SNAPSHOT,
     POLYGON_SHORT_INTEREST,
     POLYGON_TREASURY_YIELDS,
+    THETA_AAPL_EXPIRATIONS,
+    THETA_AAPL_GREEKS_20300220,
+    THETA_AAPL_GREEKS_20300227,
+    THETA_AAPL_QUOTE_20300220,
+    THETA_AAPL_QUOTE_20300227,
+    THETA_AAPL_OI_20300220,
+    THETA_AAPL_OI_20300227,
+    THETA_AAPL_OHLC_20300220,
+    THETA_AAPL_OHLC_20300227,
+    THETA_AAPL_STALE_GREEKS,
+    THETA_AAPL_STALE_QUOTE,
+    THETA_HIST_OHLC_AAPL_270C,
 )
 
 BASE_FMP = "https://financialmodelingprep.com"
 BASE_POLYGON = "https://api.polygon.io"
+BASE_THETA = THETA_TEST_URL
 
 
-def _make_options_server() -> tuple[FastMCP, PolygonClient]:
+def _make_options_server() -> tuple[FastMCP, ThetaDataClient]:
     mcp = FastMCP("Test")
-    pc = PolygonClient(api_key="test_polygon_key")
-    register_options(mcp, polygon_client=pc)
-    return mcp, pc
+    tc = ThetaDataClient(base_url=BASE_THETA)
+    register_options(mcp, theta_client=tc)
+    return mcp, tc
 
 
 def _make_economy_server() -> tuple[FastMCP, PolygonClient]:
@@ -47,12 +60,15 @@ def _make_economy_server() -> tuple[FastMCP, PolygonClient]:
     return mcp, pc
 
 
-def _make_market_server(*, with_polygon: bool = True) -> tuple[FastMCP, AsyncFMPDataClient, PolygonClient | None]:
+def _make_market_server(
+    *, with_polygon: bool = True, with_theta: bool = False
+) -> tuple[FastMCP, AsyncFMPDataClient, PolygonClient | None, ThetaDataClient | None]:
     mcp = FastMCP("Test")
     fmp = build_test_client("test_key")
     pc = PolygonClient(api_key="test_polygon_key") if with_polygon else None
-    register_market(mcp, fmp, polygon_client=pc)
-    return mcp, fmp, pc
+    tc = ThetaDataClient(base_url=BASE_THETA) if with_theta else None
+    register_market(mcp, fmp, polygon_client=pc, theta_client=tc)
+    return mcp, fmp, pc, tc
 
 
 def _make_ownership_server(*, with_polygon: bool = True) -> tuple[FastMCP, AsyncFMPDataClient, PolygonClient | None]:
@@ -63,8 +79,49 @@ def _make_ownership_server(*, with_polygon: bool = True) -> tuple[FastMCP, Async
     return mcp, fmp, pc
 
 
+def _mock_theta_chain(symbol: str = "AAPL") -> None:
+    """Wire up the four bulk_snapshot endpoints + list/expirations for AAPL."""
+    respx.get(f"{BASE_THETA}/v2/list/expirations").mock(
+        return_value=httpx.Response(200, json=THETA_AAPL_EXPIRATIONS)
+    )
+    # 20300220 expiration
+    respx.get(
+        f"{BASE_THETA}/v2/bulk_snapshot/option/all_greeks",
+        params={"root": symbol, "exp": 20300220},
+    ).mock(return_value=httpx.Response(200, json=THETA_AAPL_GREEKS_20300220))
+    respx.get(
+        f"{BASE_THETA}/v2/bulk_snapshot/option/quote",
+        params={"root": symbol, "exp": 20300220},
+    ).mock(return_value=httpx.Response(200, json=THETA_AAPL_QUOTE_20300220))
+    respx.get(
+        f"{BASE_THETA}/v2/bulk_snapshot/option/open_interest",
+        params={"root": symbol, "exp": 20300220},
+    ).mock(return_value=httpx.Response(200, json=THETA_AAPL_OI_20300220))
+    respx.get(
+        f"{BASE_THETA}/v2/bulk_snapshot/option/ohlc",
+        params={"root": symbol, "exp": 20300220},
+    ).mock(return_value=httpx.Response(200, json=THETA_AAPL_OHLC_20300220))
+    # 20300227 expiration
+    respx.get(
+        f"{BASE_THETA}/v2/bulk_snapshot/option/all_greeks",
+        params={"root": symbol, "exp": 20300227},
+    ).mock(return_value=httpx.Response(200, json=THETA_AAPL_GREEKS_20300227))
+    respx.get(
+        f"{BASE_THETA}/v2/bulk_snapshot/option/quote",
+        params={"root": symbol, "exp": 20300227},
+    ).mock(return_value=httpx.Response(200, json=THETA_AAPL_QUOTE_20300227))
+    respx.get(
+        f"{BASE_THETA}/v2/bulk_snapshot/option/open_interest",
+        params={"root": symbol, "exp": 20300227},
+    ).mock(return_value=httpx.Response(200, json=THETA_AAPL_OI_20300227))
+    respx.get(
+        f"{BASE_THETA}/v2/bulk_snapshot/option/ohlc",
+        params={"root": symbol, "exp": 20300227},
+    ).mock(return_value=httpx.Response(200, json=THETA_AAPL_OHLC_20300227))
+
+
 # ---------------------------------------------------------------------------
-# Options chain
+# Options chain (ThetaData)
 # ---------------------------------------------------------------------------
 
 
@@ -73,48 +130,49 @@ class TestOptionsChain:
     @respx.mock
     async def test_basic_options_chain(self):
         """Options chain returns grouped contracts with Greeks and put/call ratio."""
-        respx.get(f"{BASE_POLYGON}/v3/snapshot/options/AAPL").mock(
-            return_value=httpx.Response(200, json=POLYGON_OPTIONS_SNAPSHOT)
-        )
+        _mock_theta_chain()
 
-        mcp, pc = _make_options_server()
+        mcp, tc = _make_options_server()
         async with Client(mcp) as c:
             result = await c.call_tool("options_chain", {"symbol": "AAPL"})
 
         data = result.data
         assert data["symbol"] == "AAPL"
-        assert data["source"] == "polygon.io"
+        assert data["source"] == "thetadata"
         assert data["total_contracts"] == 4
 
-        # Summary should count calls and puts
         summary = data["summary"]
-        assert summary["total_calls"] == 3  # 2 calls on 2/20, 1 call on 2/27
+        assert summary["total_calls"] == 3  # 2 calls on 02-20, 1 call on 02-27
         assert summary["total_puts"] == 1
         assert summary["overall_put_call_ratio"] is not None
+        assert summary["underlying_price"] == 270.50
 
-        # Two expirations
         expirations = data["expirations"]
         assert len(expirations) == 2
-        assert expirations[0]["expiration"] == "2026-02-20"
-        assert expirations[1]["expiration"] == "2026-02-27"
+        assert expirations[0]["expiration"] == "2030-02-20"
+        assert expirations[1]["expiration"] == "2030-02-27"
 
         # Contracts sorted by strike
         contracts_0220 = expirations[0]["contracts"]
         assert contracts_0220[0]["strike"] == 270.0
         assert contracts_0220[0]["greeks"]["delta"] == 0.55
+        assert contracts_0220[0]["greeks"]["gamma"] == 0.03
         assert contracts_0220[0]["iv"] == 0.32
         assert contracts_0220[0]["open_interest"] == 15000
-        await pc.close()
+        assert contracts_0220[0]["volume"] == 5200
+        assert contracts_0220[0]["bid"] == 8.40
+        assert contracts_0220[0]["ask"] == 8.60
+        assert contracts_0220[0]["bid_size"] == 100
+        assert contracts_0220[0]["ask_size"] == 150
+        await tc.close()
 
     @pytest.mark.asyncio
     @respx.mock
     async def test_with_filters(self):
         """Options chain accepts contract_type and limit filters."""
-        respx.get(f"{BASE_POLYGON}/v3/snapshot/options/AAPL").mock(
-            return_value=httpx.Response(200, json=POLYGON_OPTIONS_SNAPSHOT)
-        )
+        _mock_theta_chain()
 
-        mcp, pc = _make_options_server()
+        mcp, tc = _make_options_server()
         async with Client(mcp) as c:
             result = await c.call_tool(
                 "options_chain",
@@ -123,29 +181,32 @@ class TestOptionsChain:
 
         data = result.data
         assert data["symbol"] == "AAPL"
-        await pc.close()
+        # All calls — should drop the 1 put from the test fixture
+        assert data["summary"]["total_puts"] == 0
+        assert data["summary"]["total_calls"] == 3
+        await tc.close()
 
     @pytest.mark.asyncio
     @respx.mock
     async def test_no_data(self):
-        """Options chain returns error when no data found."""
-        respx.get(f"{BASE_POLYGON}/v3/snapshot/options/ZZZZZ").mock(
-            return_value=httpx.Response(200, json={"status": "OK", "results": []})
+        """Options chain returns error when symbol has no expirations."""
+        respx.get(f"{BASE_THETA}/v2/list/expirations").mock(
+            return_value=httpx.Response(200, json={"header": {"error_type": None}, "response": []})
         )
 
-        mcp, pc = _make_options_server()
+        mcp, tc = _make_options_server()
         async with Client(mcp) as c:
             result = await c.call_tool("options_chain", {"symbol": "ZZZZZ"})
 
         data = result.data
         assert "error" in data
-        await pc.close()
+        await tc.close()
 
     @pytest.mark.asyncio
     @respx.mock
     async def test_invalid_contract_type(self):
         """Options chain rejects invalid contract_type."""
-        mcp, pc = _make_options_server()
+        mcp, tc = _make_options_server()
         async with Client(mcp) as c:
             result = await c.call_tool(
                 "options_chain", {"symbol": "AAPL", "contract_type": "straddle"}
@@ -154,56 +215,50 @@ class TestOptionsChain:
         data = result.data
         assert "error" in data
         assert "straddle" in data["error"]
-        await pc.close()
+        await tc.close()
 
     @pytest.mark.asyncio
     @respx.mock
     async def test_put_call_ratio_calculation(self):
         """Put/call ratio is correctly computed from open interest."""
-        respx.get(f"{BASE_POLYGON}/v3/snapshot/options/AAPL").mock(
-            return_value=httpx.Response(200, json=POLYGON_OPTIONS_SNAPSHOT)
-        )
+        _mock_theta_chain()
 
-        mcp, pc = _make_options_server()
+        mcp, tc = _make_options_server()
         async with Client(mcp) as c:
             result = await c.call_tool("options_chain", {"symbol": "AAPL"})
 
         data = result.data
-        # 2/20 expiration: calls OI = 15000 + 8000 = 23000, puts OI = 12000
+        # 02-20 expiration: calls OI = 15000 + 8000 = 23000, puts OI = 12000
         exp_0220 = data["expirations"][0]
         assert exp_0220["call_open_interest"] == 23000
         assert exp_0220["put_open_interest"] == 12000
         assert exp_0220["put_call_oi_ratio"] == round(12000 / 23000, 2)
-        await pc.close()
+        await tc.close()
 
     @pytest.mark.asyncio
     @respx.mock
     async def test_expiry_range_filter(self):
-        respx.get(f"{BASE_POLYGON}/v3/snapshot/options/AAPL").mock(
-            return_value=httpx.Response(200, json=POLYGON_OPTIONS_SNAPSHOT)
-        )
+        _mock_theta_chain()
 
-        mcp, pc = _make_options_server()
+        mcp, tc = _make_options_server()
         async with Client(mcp) as c:
             result = await c.call_tool(
                 "options_chain",
-                {"symbol": "AAPL", "expiry_from": "2026-02-21", "expiry_to": "2026-02-27"},
+                {"symbol": "AAPL", "expiry_from": "2030-02-21", "expiry_to": "2030-02-27"},
             )
 
         data = result.data
         assert data["total_contracts"] == 1
         assert len(data["expirations"]) == 1
-        assert data["expirations"][0]["expiration"] == "2026-02-27"
-        await pc.close()
+        assert data["expirations"][0]["expiration"] == "2030-02-27"
+        await tc.close()
 
     @pytest.mark.asyncio
     @respx.mock
     async def test_put_selling_metrics_present(self):
-        respx.get(f"{BASE_POLYGON}/v3/snapshot/options/AAPL").mock(
-            return_value=httpx.Response(200, json=POLYGON_OPTIONS_SNAPSHOT)
-        )
+        _mock_theta_chain()
 
-        mcp, pc = _make_options_server()
+        mcp, tc = _make_options_server()
         async with Client(mcp) as c:
             result = await c.call_tool("options_chain", {"symbol": "AAPL"})
 
@@ -218,41 +273,104 @@ class TestOptionsChain:
         assert "put_selling" in puts[0]
         assert puts[0]["put_selling"]["breakeven"] is not None
         assert data["summary"]["atm_implied_move_pct"] is not None
-        await pc.close()
+        await tc.close()
 
     @pytest.mark.asyncio
     @respx.mock
     async def test_stale_data_warning(self):
-        stale_snapshot = {
-            "status": "OK",
-            "results": [
-                {
-                    "details": {
-                        "ticker": f"O:AAPL260220C00{i:05d}",
-                        "strike_price": 250 + i,
-                        "contract_type": "call" if i % 2 == 0 else "put",
-                        "expiration_date": "2026-02-20",
-                    },
-                    "greeks": {},
-                    "implied_volatility": 0.3,
-                    "open_interest": 1000 + i,
-                    "day": {"volume": 0, "close": 1.0},
-                    "last_quote": {"bid": 0, "ask": 0, "bid_size": 0, "ask_size": 0},
-                }
-                for i in range(10)
-            ],
-        }
-        respx.get(f"{BASE_POLYGON}/v3/snapshot/options/AAPL").mock(
-            return_value=httpx.Response(200, json=stale_snapshot)
+        respx.get(f"{BASE_THETA}/v2/list/expirations").mock(
+            return_value=httpx.Response(200, json=THETA_AAPL_EXPIRATIONS)
         )
+        # All-zero bid/ask payloads on the first expiration
+        respx.get(
+            f"{BASE_THETA}/v2/bulk_snapshot/option/all_greeks",
+            params={"root": "AAPL", "exp": 20300220},
+        ).mock(return_value=httpx.Response(200, json=THETA_AAPL_STALE_GREEKS))
+        respx.get(
+            f"{BASE_THETA}/v2/bulk_snapshot/option/quote",
+            params={"root": "AAPL", "exp": 20300220},
+        ).mock(return_value=httpx.Response(200, json=THETA_AAPL_STALE_QUOTE))
+        respx.get(
+            f"{BASE_THETA}/v2/bulk_snapshot/option/open_interest",
+            params={"root": "AAPL", "exp": 20300220},
+        ).mock(return_value=httpx.Response(200, json={"header": {"error_type": None, "format": ["ms_of_day", "open_interest", "date"]}, "response": []}))
+        respx.get(
+            f"{BASE_THETA}/v2/bulk_snapshot/option/ohlc",
+            params={"root": "AAPL", "exp": 20300220},
+        ).mock(return_value=httpx.Response(200, json={"header": {"error_type": None, "format": ["ms_of_day", "open", "high", "low", "close", "volume", "count", "date"]}, "response": []}))
+        # Empty payloads for the second expiration so we focus the test on stale day-1
+        for path in (
+            "all_greeks",
+            "quote",
+            "open_interest",
+            "ohlc",
+        ):
+            respx.get(
+                f"{BASE_THETA}/v2/bulk_snapshot/option/{path}",
+                params={"root": "AAPL", "exp": 20300227},
+            ).mock(return_value=httpx.Response(200, json={"header": {"error_type": None}, "response": []}))
 
-        mcp, pc = _make_options_server()
+        mcp, tc = _make_options_server()
         async with Client(mcp) as c:
-            result = await c.call_tool("options_chain", {"symbol": "AAPL"})
+            result = await c.call_tool(
+                "options_chain",
+                {"symbol": "AAPL", "expiration_date": "2030-02-20"},
+            )
 
         data = result.data
         assert any("delayed" in w.lower() or "eod" in w.lower() for w in data.get("_warnings", []))
-        await pc.close()
+        await tc.close()
+
+
+# ---------------------------------------------------------------------------
+# Historical options bars (ThetaData)
+# ---------------------------------------------------------------------------
+
+
+class TestHistoricalOptions:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_daily_bars_for_single_contract(self):
+        respx.get(f"{BASE_THETA}/v2/hist/option/ohlc").mock(
+            return_value=httpx.Response(200, json=THETA_HIST_OHLC_AAPL_270C)
+        )
+
+        mcp, tc = _make_options_server()
+        async with Client(mcp) as c:
+            result = await c.call_tool(
+                "historical_options",
+                {
+                    "option_ticker": "O:AAPL300220C00270000",
+                    "date_from": "2030-02-18",
+                    "date_to": "2030-02-20",
+                },
+            )
+
+        data = result.data
+        assert data["source"] == "thetadata"
+        assert data["bar_count"] == 3
+        assert data["bars"][0]["date"] == "2030-02-18"
+        assert data["bars"][0]["close"] == 8.50
+        assert data["bars"][0]["volume"] == 5200
+        assert data["bars"][2]["close"] == 8.80
+        await tc.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_invalid_ticker(self):
+        mcp, tc = _make_options_server()
+        async with Client(mcp) as c:
+            result = await c.call_tool(
+                "historical_options",
+                {
+                    "option_ticker": "GARBAGE",
+                    "date_from": "2030-02-18",
+                    "date_to": "2030-02-20",
+                },
+            )
+        data = result.data
+        assert "error" in data
+        await tc.close()
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +387,7 @@ class TestMACDIndicator:
             return_value=httpx.Response(200, json=POLYGON_MACD)
         )
 
-        mcp, fmp, pc = _make_market_server()
+        mcp, fmp, pc, _tc = _make_market_server()
         async with Client(mcp) as c:
             result = await c.call_tool(
                 "technical_indicators", {"symbol": "AAPL", "indicator": "macd"}
@@ -296,7 +414,7 @@ class TestMACDIndicator:
     @respx.mock
     async def test_macd_without_polygon_returns_error(self):
         """MACD returns descriptive error when polygon_client is None."""
-        mcp, fmp, _ = _make_market_server(with_polygon=False)
+        mcp, fmp, _, _tc = _make_market_server(with_polygon=False)
         async with Client(mcp) as c:
             result = await c.call_tool(
                 "technical_indicators", {"symbol": "AAPL", "indicator": "macd"}
@@ -315,7 +433,7 @@ class TestMACDIndicator:
             return_value=httpx.Response(200, json=AAPL_RSI)
         )
 
-        mcp, fmp, pc = _make_market_server()
+        mcp, fmp, pc, _tc = _make_market_server()
         async with Client(mcp) as c:
             result = await c.call_tool(
                 "technical_indicators", {"symbol": "AAPL", "indicator": "rsi"}
@@ -335,7 +453,7 @@ class TestMACDIndicator:
             return_value=httpx.Response(500, json={"status": "ERROR", "error": "server error"})
         )
 
-        mcp, fmp, pc = _make_market_server()
+        mcp, fmp, pc, _tc = _make_market_server()
         async with Client(mcp) as c:
             result = await c.call_tool(
                 "technical_indicators", {"symbol": "AAPL", "indicator": "macd"}
@@ -355,26 +473,35 @@ class TestEarningsCalendarOI:
     @pytest.mark.asyncio
     @respx.mock
     async def test_browse_includes_oi(self):
-        """Browsing mode enriches entries with options OI from Polygon."""
+        """Browsing mode enriches entries with options OI from ThetaData."""
         respx.get(f"{BASE_FMP}/stable/earnings-calendar").mock(
             return_value=httpx.Response(200, json=EARNINGS_CALENDAR)
         )
         respx.get(f"{BASE_FMP}/stable/batch-quote").mock(
             return_value=httpx.Response(200, json=EARNINGS_BATCH_QUOTE)
         )
-        # Mock Polygon options snapshot for each symbol
+        # ThetaData expirations + OI snapshot per symbol
         for sym in ("AAPL", "MSFT", "GOOGL", "TSLA"):
-            respx.get(f"{BASE_POLYGON}/v3/snapshot/options/{sym}").mock(
-                return_value=httpx.Response(200, json=POLYGON_OPTIONS_SNAPSHOT)
+            respx.get(f"{BASE_THETA}/v2/list/expirations", params={"root": sym}).mock(
+                return_value=httpx.Response(200, json=THETA_AAPL_EXPIRATIONS)
             )
+            for exp in (20300220, 20300227):
+                respx.get(
+                    f"{BASE_THETA}/v2/bulk_snapshot/option/open_interest",
+                    params={"root": sym, "exp": exp},
+                ).mock(
+                    return_value=httpx.Response(
+                        200,
+                        json=THETA_AAPL_OI_20300220 if exp == 20300220 else THETA_AAPL_OI_20300227,
+                    )
+                )
 
-        mcp, fmp, pc = _make_market_server(with_polygon=True)
+        mcp, fmp, pc, tc = _make_market_server(with_polygon=False, with_theta=True)
         async with Client(mcp) as c:
             result = await c.call_tool("earnings_calendar", {})
 
         data = result.data
         assert data["count"] == 4
-        # Every entry should have options OI
         for e in data["earnings"]:
             assert "options" in e, f"{e['symbol']} missing options OI"
             assert e["options"]["total_oi"] > 0
@@ -390,18 +517,26 @@ class TestEarningsCalendarOI:
         respx.get(f"{BASE_FMP}/stable/earnings-calendar").mock(
             return_value=httpx.Response(200, json=EARNINGS_CALENDAR)
         )
-        respx.get(f"{BASE_POLYGON}/v3/snapshot/options/AAPL").mock(
-            return_value=httpx.Response(200, json=POLYGON_OPTIONS_SNAPSHOT)
+        respx.get(f"{BASE_THETA}/v2/list/expirations", params={"root": "AAPL"}).mock(
+            return_value=httpx.Response(200, json=THETA_AAPL_EXPIRATIONS)
         )
+        respx.get(
+            f"{BASE_THETA}/v2/bulk_snapshot/option/open_interest",
+            params={"root": "AAPL", "exp": 20300220},
+        ).mock(return_value=httpx.Response(200, json=THETA_AAPL_OI_20300220))
+        respx.get(
+            f"{BASE_THETA}/v2/bulk_snapshot/option/open_interest",
+            params={"root": "AAPL", "exp": 20300227},
+        ).mock(return_value=httpx.Response(200, json=THETA_AAPL_OI_20300227))
 
-        mcp, fmp, pc = _make_market_server(with_polygon=True)
+        mcp, fmp, pc, tc = _make_market_server(with_polygon=False, with_theta=True)
         async with Client(mcp) as c:
             result = await c.call_tool("earnings_calendar", {"symbol": "AAPL"})
 
         data = result.data
         assert data["count"] == 1
         assert "options" in data["earnings"][0]
-        # POLYGON_OPTIONS_SNAPSHOT has: calls OI = 15000+8000+6000=29000, puts OI = 12000
+        # Theta fixtures: calls OI = 15000+8000+6000=29000, puts OI = 12000
         assert data["earnings"][0]["options"]["total_oi"] == 41000
         assert data["earnings"][0]["options"]["call_oi"] == 29000
         assert data["earnings"][0]["options"]["put_oi"] == 12000
@@ -409,8 +544,8 @@ class TestEarningsCalendarOI:
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_no_polygon_skips_oi(self):
-        """Without polygon_client, earnings still work but without OI."""
+    async def test_no_theta_skips_oi(self):
+        """Without theta_client, earnings still work but without OI."""
         respx.get(f"{BASE_FMP}/stable/earnings-calendar").mock(
             return_value=httpx.Response(200, json=EARNINGS_CALENDAR)
         )
@@ -418,7 +553,7 @@ class TestEarningsCalendarOI:
             return_value=httpx.Response(200, json=EARNINGS_BATCH_QUOTE)
         )
 
-        mcp, fmp, _ = _make_market_server(with_polygon=False)
+        mcp, fmp, _, _ = _make_market_server(with_polygon=False, with_theta=False)
         async with Client(mcp) as c:
             result = await c.call_tool("earnings_calendar", {})
 

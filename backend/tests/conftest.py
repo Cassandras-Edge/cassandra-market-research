@@ -10,6 +10,7 @@ from fmp_data import AsyncFMPDataClient
 from fmp_data.base import BaseClient
 from fmp_data.config import ClientConfig, RateLimitConfig
 from cassandra_fmp.clients.polygon import PolygonClient
+from cassandra_fmp.clients.thetadata import ThetaDataClient
 from cassandra_fmp.tools._helpers import _CACHE
 
 
@@ -73,6 +74,22 @@ def mock_api():
 def mock_polygon_api():
     """Start respx mock for Polygon API calls."""
     with respx.mock(base_url="https://api.polygon.io", assert_all_called=False) as api:
+        yield api
+
+
+THETA_TEST_URL = "http://theta-test:25510"
+
+
+@pytest.fixture
+def theta_client():
+    """Create a ThetaDataClient pointing at the test base URL."""
+    return ThetaDataClient(base_url=THETA_TEST_URL)
+
+
+@pytest.fixture
+def mock_theta_api():
+    """Start respx mock for ThetaTerminal REST API calls."""
+    with respx.mock(base_url=THETA_TEST_URL, assert_all_called=False) as api:
         yield api
 
 
@@ -1083,5 +1100,188 @@ POLYGON_LABOR_MARKET = {
     "results": [
         {"date": "2026-01-10", "unemployment_rate": 4.1, "labor_force_participation_rate": 62.5, "avg_hourly_earnings": 35.20, "job_openings": 8500},
         {"date": "2025-12-06", "unemployment_rate": 4.2, "labor_force_participation_rate": 62.4, "avg_hourly_earnings": 35.05, "job_openings": 8300},
+    ],
+}
+
+
+# --- ThetaData Fixtures ---
+#
+# These reproduce the same 4-contract scenario the legacy Polygon fixtures
+# used (2 expirations, AAPL, $270C/$270P/$280C and $275C). Dates are pinned
+# to 2030 so the "next 6 future expirations" filter in options_chain stays
+# satisfied for years.
+
+THETA_AAPL_EXPIRATIONS = {
+    "header": {"error_type": None, "format": ["expiration"]},
+    "response": ["20300220", "20300227"],
+}
+
+# Format for /v2/bulk_snapshot/option/all_greeks
+_GREEKS_FORMAT = [
+    "ms_of_day", "bid", "ask", "delta", "theta", "vega", "rho", "epsilon",
+    "lambda", "gamma", "vanna", "charm", "vomma", "veta", "speed", "zomma",
+    "color", "ultima", "implied_vol", "iv_error", "ms_of_day2",
+    "underlying_price", "date",
+]
+
+
+def _greeks_tick(*, bid, ask, delta, gamma, theta, vega, iv, underlying):
+    """Build a single greeks-format tick row mirroring the docs example."""
+    row = [0] * len(_GREEKS_FORMAT)
+    row[_GREEKS_FORMAT.index("bid")] = bid
+    row[_GREEKS_FORMAT.index("ask")] = ask
+    row[_GREEKS_FORMAT.index("delta")] = delta
+    row[_GREEKS_FORMAT.index("theta")] = theta
+    row[_GREEKS_FORMAT.index("vega")] = vega
+    row[_GREEKS_FORMAT.index("gamma")] = gamma
+    row[_GREEKS_FORMAT.index("implied_vol")] = iv
+    row[_GREEKS_FORMAT.index("underlying_price")] = underlying
+    return row
+
+
+def _theta_contract(strike_dollars: float, right: str, expiration: int) -> dict:
+    return {
+        "root": "AAPL",
+        "expiration": expiration,
+        "strike": int(round(strike_dollars * 1000)),
+        "right": right,
+    }
+
+
+# Greeks payloads — one per expiration. The merge logic uses (exp, strike, right)
+# as the key, so we keep separate dicts per expiration to mirror real responses.
+THETA_AAPL_GREEKS_20300220 = {
+    "header": {"error_type": None, "format": _GREEKS_FORMAT},
+    "response": [
+        {
+            "ticks": [_greeks_tick(bid=8.40, ask=8.60, delta=0.55, gamma=0.03, theta=-0.15, vega=0.25, iv=0.32, underlying=270.50)],
+            "contract": _theta_contract(270.0, "C", 20300220),
+        },
+        {
+            "ticks": [_greeks_tick(bid=5.10, ask=5.30, delta=-0.45, gamma=0.03, theta=-0.12, vega=0.22, iv=0.34, underlying=270.50)],
+            "contract": _theta_contract(270.0, "P", 20300220),
+        },
+        {
+            "ticks": [_greeks_tick(bid=4.20, ask=4.40, delta=0.35, gamma=0.04, theta=-0.10, vega=0.20, iv=0.30, underlying=270.50)],
+            "contract": _theta_contract(280.0, "C", 20300220),
+        },
+    ],
+}
+
+THETA_AAPL_GREEKS_20300227 = {
+    "header": {"error_type": None, "format": _GREEKS_FORMAT},
+    "response": [
+        {
+            "ticks": [_greeks_tick(bid=8.90, ask=9.10, delta=0.50, gamma=0.02, theta=-0.08, vega=0.30, iv=0.31, underlying=270.50)],
+            "contract": _theta_contract(275.0, "C", 20300227),
+        },
+    ],
+}
+
+# Quote payload format: bid_size + ask_size + last NBBO
+_QUOTE_FORMAT = [
+    "ms_of_day", "bid_size", "bid_exchange", "bid", "bid_condition",
+    "ask_size", "ask_exchange", "ask", "ask_condition", "date",
+]
+
+
+def _quote_tick(*, bid_size, bid, ask_size, ask):
+    row = [0] * len(_QUOTE_FORMAT)
+    row[_QUOTE_FORMAT.index("bid_size")] = bid_size
+    row[_QUOTE_FORMAT.index("bid")] = bid
+    row[_QUOTE_FORMAT.index("ask_size")] = ask_size
+    row[_QUOTE_FORMAT.index("ask")] = ask
+    return row
+
+
+THETA_AAPL_QUOTE_20300220 = {
+    "header": {"error_type": None, "format": _QUOTE_FORMAT},
+    "response": [
+        {"ticks": [_quote_tick(bid_size=100, bid=8.40, ask_size=150, ask=8.60)], "contract": _theta_contract(270.0, "C", 20300220)},
+        {"ticks": [_quote_tick(bid_size=80, bid=5.10, ask_size=120, ask=5.30)], "contract": _theta_contract(270.0, "P", 20300220)},
+        {"ticks": [_quote_tick(bid_size=60, bid=4.20, ask_size=90, ask=4.40)], "contract": _theta_contract(280.0, "C", 20300220)},
+    ],
+}
+
+THETA_AAPL_QUOTE_20300227 = {
+    "header": {"error_type": None, "format": _QUOTE_FORMAT},
+    "response": [
+        {"ticks": [_quote_tick(bid_size=50, bid=8.90, ask_size=70, ask=9.10)], "contract": _theta_contract(275.0, "C", 20300227)},
+    ],
+}
+
+# Open interest format: ["ms_of_day", "open_interest", "date"]
+def _oi_tick(oi: int) -> list:
+    return [0, oi, 0]
+
+
+THETA_AAPL_OI_20300220 = {
+    "header": {"error_type": None, "format": ["ms_of_day", "open_interest", "date"]},
+    "response": [
+        {"ticks": [_oi_tick(15000)], "contract": _theta_contract(270.0, "C", 20300220)},
+        {"ticks": [_oi_tick(12000)], "contract": _theta_contract(270.0, "P", 20300220)},
+        {"ticks": [_oi_tick(8000)], "contract": _theta_contract(280.0, "C", 20300220)},
+    ],
+}
+
+THETA_AAPL_OI_20300227 = {
+    "header": {"error_type": None, "format": ["ms_of_day", "open_interest", "date"]},
+    "response": [
+        {"ticks": [_oi_tick(6000)], "contract": _theta_contract(275.0, "C", 20300227)},
+    ],
+}
+
+# OHLC format: ["ms_of_day", "open", "high", "low", "close", "volume", "count", "date"]
+def _ohlc_tick(*, close: float, volume: int) -> list:
+    return [0, close, close, close, close, volume, 0, 0]
+
+
+THETA_AAPL_OHLC_20300220 = {
+    "header": {"error_type": None, "format": ["ms_of_day", "open", "high", "low", "close", "volume", "count", "date"]},
+    "response": [
+        {"ticks": [_ohlc_tick(close=8.50, volume=5200)], "contract": _theta_contract(270.0, "C", 20300220)},
+        {"ticks": [_ohlc_tick(close=5.20, volume=3800)], "contract": _theta_contract(270.0, "P", 20300220)},
+        {"ticks": [_ohlc_tick(close=4.30, volume=2100)], "contract": _theta_contract(280.0, "C", 20300220)},
+    ],
+}
+
+THETA_AAPL_OHLC_20300227 = {
+    "header": {"error_type": None, "format": ["ms_of_day", "open", "high", "low", "close", "volume", "count", "date"]},
+    "response": [
+        {"ticks": [_ohlc_tick(close=9.00, volume=1500)], "contract": _theta_contract(275.0, "C", 20300227)},
+    ],
+}
+
+# Stale-quote scenario for the warning test (all bid/ask are 0)
+THETA_AAPL_STALE_GREEKS = {
+    "header": {"error_type": None, "format": _GREEKS_FORMAT},
+    "response": [
+        {
+            "ticks": [_greeks_tick(bid=0, ask=0, delta=0.05, gamma=0.01, theta=-0.01, vega=0.05, iv=0.30, underlying=270.50)],
+            "contract": _theta_contract(250.0 + i, "C", 20300220),
+        }
+        for i in range(10)
+    ],
+}
+
+THETA_AAPL_STALE_QUOTE = {
+    "header": {"error_type": None, "format": _QUOTE_FORMAT},
+    "response": [
+        {"ticks": [_quote_tick(bid_size=0, bid=0, ask_size=0, ask=0)], "contract": _theta_contract(250.0 + i, "C", 20300220)}
+        for i in range(10)
+    ],
+}
+
+
+# Historical OHLC for a single contract — used by historical_options test
+THETA_HIST_OHLC_AAPL_270C = {
+    "header": {
+        "error_type": None,
+        "format": ["ms_of_day", "open", "high", "low", "close", "volume", "count", "date"],
+    },
+    "response": [
+        [34200000, 8.40, 8.65, 8.30, 8.50, 5200, 410, 20300218],
+        [34200000, 8.50, 8.80, 8.45, 8.75, 6100, 470, 20300219],
+        [34200000, 8.75, 9.00, 8.60, 8.80, 5900, 455, 20300220],
     ],
 }

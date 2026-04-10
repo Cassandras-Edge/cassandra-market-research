@@ -1,14 +1,18 @@
-"""Options chain tool via Schwab (primary) and Polygon.io (fallback)."""
+"""Options chain + historical option bars via ThetaData."""
 
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
-    from cassandra_fmp.clients.polygon import PolygonClient
-    from cassandra_fmp.clients.schwab import SchwabClient
+    from cassandra_fmp.clients.thetadata import ThetaDataClient
+
+
+# ---------------------------------------------------------------------------
+# Date / numeric helpers
+# ---------------------------------------------------------------------------
 
 
 def _parse_iso_date(raw: str | None, field_name: str) -> tuple[date | None, str | None]:
@@ -18,6 +22,37 @@ def _parse_iso_date(raw: str | None, field_name: str) -> tuple[date | None, str 
         return datetime.strptime(raw, "%Y-%m-%d").date(), None
     except ValueError:
         return None, f"Invalid {field_name} '{raw}'. Expected YYYY-MM-DD."
+
+
+def _yyyymmdd_to_iso(yyyymmdd: int | str | None) -> str | None:
+    if yyyymmdd is None:
+        return None
+    try:
+        s = str(int(yyyymmdd))
+    except (TypeError, ValueError):
+        return None
+    if len(s) != 8:
+        return None
+    return f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
+
+
+def _iso_to_yyyymmdd(iso: str | None) -> int | None:
+    if not iso:
+        return None
+    try:
+        return int(datetime.strptime(iso, "%Y-%m-%d").strftime("%Y%m%d"))
+    except ValueError:
+        return None
+
+
+def _theta_strike_to_dollars(strike: int | float | None) -> float | None:
+    """ThetaData strike is in 1/10 of a cent — divide by 1000 for dollars."""
+    if strike is None:
+        return None
+    try:
+        return round(float(strike) / 1000.0, 4)
+    except (TypeError, ValueError):
+        return None
 
 
 def _option_mark(bid: float | None, ask: float | None, last_price: float | None) -> float | None:
@@ -71,114 +106,260 @@ def _build_put_selling_metrics(
     }
 
 
-def _normalize_schwab_contracts(
-    data: dict,
+# ---------------------------------------------------------------------------
+# ThetaData response parsing
+# ---------------------------------------------------------------------------
+
+
+def _format_index(header: dict | None, name: str) -> int | None:
+    """Look up the position of a named field in a ThetaData header.format list."""
+    if not isinstance(header, dict):
+        return None
+    fmt = header.get("format")
+    if not isinstance(fmt, list):
+        return None
+    try:
+        return fmt.index(name)
+    except ValueError:
+        return None
+
+
+def _first_tick_value(ticks: Any, idx: int | None) -> Any:
+    """Pull a value out of the first tick row by column index."""
+    if idx is None or not isinstance(ticks, list) or not ticks:
+        return None
+    row = ticks[0]
+    if not isinstance(row, list) or idx >= len(row):
+        return None
+    return row[idx]
+
+
+def _contract_key(contract: dict | None) -> tuple | None:
+    """Stable merge key for a ThetaData contract: (exp_int, strike_int, right_str)."""
+    if not isinstance(contract, dict):
+        return None
+    exp = contract.get("expiration")
+    strike = contract.get("strike")
+    right = contract.get("right")
+    if exp is None or strike is None or not right:
+        return None
+    return (int(exp), int(strike), str(right).upper())
+
+
+def _build_thetadata_contracts(
     *,
-    contract_type_filter: str | None = None,
-    strike_gte: float | None = None,
-    strike_lte: float | None = None,
-    expiry_from_dt: date | None = None,
-    expiry_to_dt: date | None = None,
-    limit: int = 250,
+    greeks_payload: dict | None,
+    quote_payload: dict | None,
+    oi_payload: dict | None,
+    ohlc_payload: dict | None,
 ) -> tuple[list[dict], float | None]:
-    """Flatten Schwab's nested expiration maps into a normalized contract list.
+    """Merge the four bulk_snapshot payloads into our normalized contract list."""
 
-    Returns (contracts, underlying_price).
-    """
-    underlying_price = data.get("underlyingPrice")
+    # Greeks payload is the spine — it's the only one with greeks/IV/underlying.
+    if not isinstance(greeks_payload, dict):
+        return [], None
+
+    g_header = greeks_payload.get("header") or {}
+    g_idx = {
+        "bid": _format_index(g_header, "bid"),
+        "ask": _format_index(g_header, "ask"),
+        "delta": _format_index(g_header, "delta"),
+        "gamma": _format_index(g_header, "gamma"),
+        "theta": _format_index(g_header, "theta"),
+        "vega": _format_index(g_header, "vega"),
+        "iv": _format_index(g_header, "implied_vol"),
+        "underlying_price": _format_index(g_header, "underlying_price"),
+    }
+
+    # Side payloads — index by contract key for cheap merges.
+    quote_by_key: dict[tuple, dict] = {}
+    if isinstance(quote_payload, dict):
+        q_header = quote_payload.get("header") or {}
+        q_idx = {
+            "bid_size": _format_index(q_header, "bid_size"),
+            "ask_size": _format_index(q_header, "ask_size"),
+            "bid": _format_index(q_header, "bid"),
+            "ask": _format_index(q_header, "ask"),
+        }
+        for entry in quote_payload.get("response") or []:
+            key = _contract_key(entry.get("contract"))
+            if key is None:
+                continue
+            ticks = entry.get("ticks")
+            quote_by_key[key] = {
+                "bid_size": _first_tick_value(ticks, q_idx["bid_size"]),
+                "ask_size": _first_tick_value(ticks, q_idx["ask_size"]),
+                "bid": _first_tick_value(ticks, q_idx["bid"]),
+                "ask": _first_tick_value(ticks, q_idx["ask"]),
+            }
+
+    oi_by_key: dict[tuple, int | None] = {}
+    if isinstance(oi_payload, dict):
+        o_header = oi_payload.get("header") or {}
+        oi_idx = _format_index(o_header, "open_interest")
+        for entry in oi_payload.get("response") or []:
+            key = _contract_key(entry.get("contract"))
+            if key is None:
+                continue
+            oi_by_key[key] = _first_tick_value(entry.get("ticks"), oi_idx)
+
+    ohlc_by_key: dict[tuple, dict] = {}
+    if isinstance(ohlc_payload, dict):
+        h_header = ohlc_payload.get("header") or {}
+        h_idx = {
+            "volume": _format_index(h_header, "volume"),
+            "close": _format_index(h_header, "close"),
+        }
+        for entry in ohlc_payload.get("response") or []:
+            key = _contract_key(entry.get("contract"))
+            if key is None:
+                continue
+            ticks = entry.get("ticks")
+            ohlc_by_key[key] = {
+                "volume": _first_tick_value(ticks, h_idx["volume"]),
+                "close": _first_tick_value(ticks, h_idx["close"]),
+            }
+
+    # Build contracts off the greeks payload.
     contracts: list[dict] = []
-
-    maps_to_process: list[str] = []
-    if contract_type_filter is None or contract_type_filter == "call":
-        maps_to_process.append("callExpDateMap")
-    if contract_type_filter is None or contract_type_filter == "put":
-        maps_to_process.append("putExpDateMap")
-
-    for map_key in maps_to_process:
-        exp_map = data.get(map_key, {})
-        if not isinstance(exp_map, dict):
+    underlying_price: float | None = None
+    for entry in greeks_payload.get("response") or []:
+        contract_meta = entry.get("contract") or {}
+        key = _contract_key(contract_meta)
+        if key is None:
             continue
 
-        for exp_key, strikes in exp_map.items():
-            # exp_key format: "YYYY-MM-DD:DTE"
-            exp_date_str = exp_key.split(":")[0] if ":" in exp_key else exp_key
+        ticks = entry.get("ticks") or []
+        bid = _first_tick_value(ticks, g_idx["bid"])
+        ask = _first_tick_value(ticks, g_idx["ask"])
+        underlying = _first_tick_value(ticks, g_idx["underlying_price"])
+        if underlying_price is None and isinstance(underlying, (int, float)) and underlying > 0:
+            underlying_price = float(underlying)
 
-            # Apply expiration date filters
-            exp_dt, _ = _parse_iso_date(exp_date_str, "expiration")
-            if exp_dt is not None:
-                if expiry_from_dt and exp_dt < expiry_from_dt:
-                    continue
-                if expiry_to_dt and exp_dt > expiry_to_dt:
-                    continue
+        strike_dollars = _theta_strike_to_dollars(contract_meta.get("strike"))
+        right = (contract_meta.get("right") or "").upper()
+        contract_type = "call" if right == "C" else "put" if right == "P" else None
+        exp_iso = _yyyymmdd_to_iso(contract_meta.get("expiration"))
+        root = contract_meta.get("root") or ""
 
-            if not isinstance(strikes, dict):
-                continue
+        # Synthesize an OCC-style ticker so downstream renderers (workflows,
+        # historical_options) have something stable to call back into.
+        ticker = None
+        if root and exp_iso and strike_dollars is not None and right in ("C", "P"):
+            yymmdd = exp_iso.replace("-", "")[2:]
+            strike_int = int(round(strike_dollars * 1000))
+            ticker = f"O:{root}{yymmdd}{right}{strike_int:08d}"
 
-            for _strike_str, contract_list in strikes.items():
-                if not isinstance(contract_list, list):
-                    continue
+        merged_quote = quote_by_key.get(key, {})
+        # Prefer last NBBO from the quote endpoint when available; fall back
+        # to the bid/ask carried inside the all_greeks payload.
+        eff_bid = merged_quote.get("bid") if merged_quote.get("bid") is not None else bid
+        eff_ask = merged_quote.get("ask") if merged_quote.get("ask") is not None else ask
+        ohlc_data = ohlc_by_key.get(key, {})
+        last_price = ohlc_data.get("close")
 
-                for c in contract_list:
-                    strike = c.get("strikePrice")
+        out: dict[str, Any] = {
+            "ticker": ticker,
+            "strike": strike_dollars,
+            "type": contract_type,
+            "expiration": exp_iso or "unknown",
+            "greeks": {
+                "delta": _first_tick_value(ticks, g_idx["delta"]),
+                "gamma": _first_tick_value(ticks, g_idx["gamma"]),
+                "theta": _first_tick_value(ticks, g_idx["theta"]),
+                "vega": _first_tick_value(ticks, g_idx["vega"]),
+            },
+            "iv": _first_tick_value(ticks, g_idx["iv"]),
+            "open_interest": oi_by_key.get(key),
+            "volume": ohlc_data.get("volume"),
+            "last_price": last_price,
+            "bid": eff_bid,
+            "ask": eff_ask,
+            "bid_size": merged_quote.get("bid_size"),
+            "ask_size": merged_quote.get("ask_size"),
+        }
+        mark = _option_mark(eff_bid, eff_ask, last_price)
+        if mark is not None:
+            out["mark"] = mark
 
-                    # Apply strike filters
-                    if strike_gte is not None and (strike is None or strike < strike_gte):
-                        continue
-                    if strike_lte is not None and (strike is None or strike > strike_lte):
-                        continue
-
-                    put_call = (c.get("putCall") or "").lower()
-                    mark = c.get("mark")
-                    bid = c.get("bid")
-                    ask = c.get("ask")
-
-                    entry = {
-                        "ticker": c.get("symbol"),
-                        "strike": strike,
-                        "type": put_call,
-                        "expiration": exp_date_str,
-                        "greeks": {
-                            "delta": c.get("delta"),
-                            "gamma": c.get("gamma"),
-                            "theta": c.get("theta"),
-                            "vega": c.get("vega"),
-                        },
-                        "iv": c.get("volatility"),
-                        "open_interest": c.get("openInterest"),
-                        "volume": c.get("totalVolume"),
-                        "last_price": c.get("last"),
-                        "bid": bid,
-                        "ask": ask,
-                        "bid_size": c.get("bidSize"),
-                        "ask_size": c.get("askSize"),
-                    }
-
-                    # Schwab provides mark directly
-                    if mark is not None:
-                        entry["mark"] = mark
-                    else:
-                        computed_mark = _option_mark(bid, ask, c.get("last"))
-                        if computed_mark is not None:
-                            entry["mark"] = computed_mark
-
-                    contracts.append(entry)
-
-                    if len(contracts) >= limit:
-                        return contracts, underlying_price
+        contracts.append(out)
 
     return contracts, underlying_price
 
 
-def _epoch_ms_to_date(ts: int) -> str:
-    """Convert epoch millis to YYYY-MM-DD."""
-    return datetime.utcfromtimestamp(ts / 1000).strftime("%Y-%m-%d")
+# ---------------------------------------------------------------------------
+# Polygon-style option ticker parsing (for historical_options compatibility)
+# ---------------------------------------------------------------------------
+
+
+def _parse_occ_ticker(raw: str) -> tuple[str, int, str, int] | None:
+    """Parse 'O:AAPL250516C00220000' → (root, exp_int, right, strike_int).
+
+    The strike at the end is the dollar strike * 1000 (so $220.00 → 00220000).
+    ThetaData wants the same strike representation (1/10 cent), so we pass
+    that integer through unchanged.
+    """
+    s = raw.strip().lstrip("O:").strip()
+    if len(s) < 16:
+        return None
+
+    # Walk back from the end: 8-digit strike, 1-char right, 6-digit yymmdd
+    try:
+        strike_int = int(s[-8:])
+        right = s[-9].upper()
+        yymmdd = s[-15:-9]
+        root = s[:-15]
+    except (ValueError, IndexError):
+        return None
+
+    if right not in ("C", "P") or not root:
+        return None
+    try:
+        # YYMMDD → YYYYMMDD (assume 20xx; ThetaData rejects pre-2000 anyway)
+        yy = int(yymmdd[0:2])
+        mm = int(yymmdd[2:4])
+        dd = int(yymmdd[4:6])
+        exp_int = (2000 + yy) * 10000 + mm * 100 + dd
+    except ValueError:
+        return None
+
+    return root, exp_int, right, strike_int
+
+
+def _bar_date_label(date_int: int | None) -> str | None:
+    if date_int is None:
+        return None
+    try:
+        s = str(int(date_int))
+    except (TypeError, ValueError):
+        return None
+    if len(s) != 8:
+        return None
+    return f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
+
+
+def _ms_to_clock(ms: int | None) -> str | None:
+    if ms is None:
+        return None
+    try:
+        ms_int = int(ms)
+    except (TypeError, ValueError):
+        return None
+    seconds = ms_int // 1000
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+# ---------------------------------------------------------------------------
+# Tool registration
+# ---------------------------------------------------------------------------
 
 
 def register(
     mcp: FastMCP,
     *,
-    polygon_client: PolygonClient | None = None,
-    schwab_client: SchwabClient | None = None,
+    theta_client: ThetaDataClient | None = None,
 ) -> None:
     @mcp.tool(
         annotations={
@@ -241,98 +422,102 @@ def register(
             if ct not in ("call", "put"):
                 return {"error": f"Invalid contract_type '{contract_type}'. Use 'call' or 'put'."}
 
-        # ------------------------------------------------------------------
-        # Try Schwab first
-        # ------------------------------------------------------------------
-        schwab_contracts = None
-        underlying_price = None
-
-        if schwab_client is not None:
-            schwab_kwargs: dict = {}
-            if ct:
-                schwab_kwargs["contract_type"] = ct.upper()
-            if expiration_dt:
-                schwab_kwargs["from_date"] = expiration_date
-                schwab_kwargs["to_date"] = expiration_date
-            else:
-                if expiry_from_dt:
-                    schwab_kwargs["from_date"] = expiry_from
-                if expiry_to_dt:
-                    schwab_kwargs["to_date"] = expiry_to
-            # Request enough strikes to cover the limit
-            schwab_kwargs["strike_count"] = max(limit // 2, 20)
-
-            raw = await schwab_client.get_option_chain(symbol, **schwab_kwargs)
-
-            if raw and isinstance(raw, dict):
-                # The response is wrapped: raw may be {"status_code": 200, "data": {...}}
-                chain_data = raw.get("data", raw)
-                if isinstance(chain_data, dict) and chain_data.get("status") == "SUCCESS":
-                    schwab_contracts, underlying_price = _normalize_schwab_contracts(
-                        chain_data,
-                        contract_type_filter=ct,
-                        strike_gte=strike_gte,
-                        strike_lte=strike_lte,
-                        expiry_from_dt=expiry_from_dt if not expiration_dt else None,
-                        expiry_to_dt=expiry_to_dt if not expiration_dt else None,
-                        limit=limit,
-                    )
-
-        if schwab_contracts:
-            return _build_chain_result(
-                symbol, schwab_contracts, underlying_price, source="schwab"
-            )
+        if theta_client is None:
+            return {"error": f"No options data available for '{symbol}' (ThetaData not configured)"}
 
         # ------------------------------------------------------------------
-        # Fallback to Polygon
+        # Determine which expirations to fetch
         # ------------------------------------------------------------------
-        if polygon_client is None:
-            return {"error": f"No options data available for '{symbol}' (no data sources configured)"}
+        all_expirations = await theta_client.list_expirations(symbol)
+        if not all_expirations:
+            return {"error": f"No options expirations found for '{symbol}'"}
 
-        params: dict = {"limit": limit}
+        target_expirations: list[str] = []
         if expiration_dt:
-            params["expiration_date"] = expiration_date
-        if ct:
-            params["contract_type"] = ct
-        if strike_gte is not None:
-            params["strike_price.gte"] = strike_gte
-        if strike_lte is not None:
-            params["strike_price.lte"] = strike_lte
-
-        data = await polygon_client.get_safe(
-            f"/v3/snapshot/options/{symbol}",
-            params=params,
-            cache_ttl=polygon_client.TTL_REALTIME,
-        )
-
-        if not data or not isinstance(data, dict):
-            return {"error": f"No options data found for '{symbol}'"}
-
-        results = data.get("results", [])
-        if expiry_from_dt or expiry_to_dt:
-            filtered_results = []
-            for contract in results:
-                exp_raw = (contract.get("details") or {}).get("expiration_date")
-                exp_dt, _ = _parse_iso_date(exp_raw, "expiration")
+            wanted = expiration_dt.strftime("%Y%m%d")
+            if wanted in all_expirations:
+                target_expirations.append(wanted)
+            else:
+                return {
+                    "error": f"Expiration {expiration_date} not available for '{symbol}'",
+                    "hint": "Use expiry_from/expiry_to to browse a date range.",
+                }
+        else:
+            for exp_str in all_expirations:
+                exp_dt = _parse_iso_date(_yyyymmdd_to_iso(exp_str), "expiration")[0]
                 if exp_dt is None:
                     continue
                 if expiry_from_dt and exp_dt < expiry_from_dt:
                     continue
                 if expiry_to_dt and exp_dt > expiry_to_dt:
                     continue
-                filtered_results.append(contract)
-            results = filtered_results
+                target_expirations.append(exp_str)
 
-        if not results:
+            # When no range filter is supplied, default to the next ~6 expiries
+            # so we don't pull the whole chain on a busy underlying like SPY.
+            if not expiry_from_dt and not expiry_to_dt:
+                today_str = date.today().strftime("%Y%m%d")
+                future = [e for e in target_expirations if e >= today_str]
+                target_expirations = future[:6] if future else target_expirations[:6]
+
+        if not target_expirations:
             return {"error": f"No options contracts found for '{symbol}' with given filters"}
 
-        # Normalize Polygon contracts
-        polygon_contracts, poly_underlying = _normalize_polygon_contracts(results, data)
-        return _build_chain_result(
-            symbol, polygon_contracts, poly_underlying, source="polygon.io"
-        )
+        # ------------------------------------------------------------------
+        # Fan out the four bulk_snapshot calls per expiration
+        # ------------------------------------------------------------------
+        import asyncio  # noqa: PLC0415
 
-    if polygon_client is not None:
+        async def _fetch_one(exp_str: str) -> tuple[dict | None, dict | None, dict | None, dict | None]:
+            try:
+                exp_int = int(exp_str)
+            except ValueError:
+                return None, None, None, None
+            return await asyncio.gather(
+                theta_client.bulk_snapshot_all_greeks(symbol, exp_int),
+                theta_client.bulk_snapshot_quote(symbol, exp_int),
+                theta_client.bulk_snapshot_open_interest(symbol, exp_int),
+                theta_client.bulk_snapshot_ohlc(symbol, exp_int),
+            )
+
+        all_results = await asyncio.gather(*[_fetch_one(e) for e in target_expirations])
+
+        # Merge per-expiration results into a single contract list
+        merged_contracts: list[dict] = []
+        underlying_price: float | None = None
+        for greeks_p, quote_p, oi_p, ohlc_p in all_results:
+            partial, partial_under = _build_thetadata_contracts(
+                greeks_payload=greeks_p,
+                quote_payload=quote_p,
+                oi_payload=oi_p,
+                ohlc_payload=ohlc_p,
+            )
+            merged_contracts.extend(partial)
+            if underlying_price is None and partial_under is not None:
+                underlying_price = partial_under
+
+        # ------------------------------------------------------------------
+        # Client-side strike + contract_type filters, then truncate to limit
+        # ------------------------------------------------------------------
+        filtered: list[dict] = []
+        for c in merged_contracts:
+            if ct and c.get("type") != ct:
+                continue
+            strike = c.get("strike")
+            if strike_gte is not None and (strike is None or strike < strike_gte):
+                continue
+            if strike_lte is not None and (strike is None or strike > strike_lte):
+                continue
+            filtered.append(c)
+            if len(filtered) >= limit:
+                break
+
+        if not filtered:
+            return {"error": f"No options contracts found for '{symbol}' with given filters"}
+
+        return _build_chain_result(symbol, filtered, underlying_price, source="thetadata")
+
+    if theta_client is not None:
         @mcp.tool(
             annotations={
                 "title": "Historical Options",
@@ -353,12 +538,12 @@ def register(
         ) -> dict:
             """Get historical OHLCV price bars for an options contract.
 
-            Returns open, high, low, close, volume, VWAP, and trade count for each
-            bar in the date range. Use this for backtesting, charting option price
-            history, or analyzing how a specific contract traded over time.
+            Returns open, high, low, close, volume, and trade count for each
+            bar in the date range. Use this for backtesting, charting option
+            price history, or analyzing how a specific contract traded.
 
             Args:
-                option_ticker: Polygon option ticker (e.g. "O:AAPL250516C00220000").
+                option_ticker: OCC-style option ticker (e.g. "O:AAPL250516C00220000").
                     Format: O:{UNDERLYING}{YYMMDD}{C|P}{STRIKE*1000 zero-padded 8 digits}
                 date_from: Start date (YYYY-MM-DD)
                 date_to: End date (YYYY-MM-DD)
@@ -367,51 +552,104 @@ def register(
                 symbol: Optional underlying ticker for context in the response
                 limit: Max bars to return (default 250, max 5000)
             """
-            option_ticker = option_ticker.strip()
-            if not option_ticker.startswith("O:"):
-                option_ticker = f"O:{option_ticker}"
+            parsed = _parse_occ_ticker(option_ticker)
+            if parsed is None:
+                return {
+                    "error": f"Invalid option ticker '{option_ticker}'.",
+                    "hint": "Expected OCC format: O:AAPL250516C00220000 (root + YYMMDD + C/P + strike*1000)",
+                }
+            root, exp_int, right, strike_int = parsed
 
-            _, from_err = _parse_iso_date(date_from, "date_from")
+            from_dt, from_err = _parse_iso_date(date_from, "date_from")
             if from_err:
                 return {"error": from_err}
-            _, to_err = _parse_iso_date(date_to, "date_to")
+            to_dt, to_err = _parse_iso_date(date_to, "date_to")
             if to_err:
                 return {"error": to_err}
+            if from_dt is None or to_dt is None:
+                return {"error": "date_from and date_to are required"}
 
             valid_timespans = {"minute", "hour", "day", "week", "month"}
             if timespan not in valid_timespans:
                 return {"error": f"Invalid timespan '{timespan}'. Use one of: {', '.join(sorted(valid_timespans))}"}
 
             limit = max(1, min(limit, 5000))
+            multiplier = max(1, multiplier)
 
-            data = await polygon_client.get_safe(
-                f"/v2/aggs/ticker/{option_ticker}/range/{multiplier}/{timespan}/{date_from}/{date_to}",
-                params={"adjusted": "true", "sort": "asc", "limit": limit},
-                cache_ttl=polygon_client.TTL_DAILY,
+            # ThetaData has no native week/month bars; roll up from daily.
+            ms_per_unit = {
+                "minute": 60_000,
+                "hour": 3_600_000,
+                "day": 86_400_000,
+            }
+            rollup_target: str | None = None
+            if timespan in ms_per_unit:
+                ivl_ms = ms_per_unit[timespan] * multiplier
+            else:
+                ivl_ms = 86_400_000  # fetch dailies, roll up client-side
+                rollup_target = timespan
+
+            data = await theta_client.hist_option_ohlc(
+                root=root,
+                exp=exp_int,
+                strike=strike_int,
+                right=right,
+                start_date=int(from_dt.strftime("%Y%m%d")),
+                end_date=int(to_dt.strftime("%Y%m%d")),
+                ivl_ms=ivl_ms,
             )
 
             if not data or not isinstance(data, dict):
                 return {"error": f"No historical data found for '{option_ticker}'"}
 
-            results = data.get("results") or []
-            if not results:
+            header = data.get("header") or {}
+            response = data.get("response") or []
+            if not response:
                 return {
                     "error": f"No bars found for '{option_ticker}' from {date_from} to {date_to}",
-                    "hint": "Check that the option ticker format is correct: O:AAPL250516C00220000",
+                    "hint": "Check that the option ticker is valid for this date range.",
                 }
 
-            bars = []
-            for bar in results:
-                bars.append({
-                    "date": _epoch_ms_to_date(bar["t"]),
-                    "open": bar.get("o"),
-                    "high": bar.get("h"),
-                    "low": bar.get("l"),
-                    "close": bar.get("c"),
-                    "volume": bar.get("v"),
-                    "vwap": bar.get("vw"),
-                    "trades": bar.get("n"),
-                })
+            idx = {
+                "ms_of_day": _format_index(header, "ms_of_day"),
+                "open": _format_index(header, "open"),
+                "high": _format_index(header, "high"),
+                "low": _format_index(header, "low"),
+                "close": _format_index(header, "close"),
+                "volume": _format_index(header, "volume"),
+                "count": _format_index(header, "count"),
+                "date": _format_index(header, "date"),
+            }
+
+            def _row_value(row: list, name: str) -> Any:
+                pos = idx[name]
+                if pos is None or pos >= len(row):
+                    return None
+                return row[pos]
+
+            bars: list[dict] = []
+            for row in response:
+                if not isinstance(row, list):
+                    continue
+                date_label = _bar_date_label(_row_value(row, "date"))
+                bar_entry: dict[str, Any] = {
+                    "date": date_label,
+                    "open": _row_value(row, "open"),
+                    "high": _row_value(row, "high"),
+                    "low": _row_value(row, "low"),
+                    "close": _row_value(row, "close"),
+                    "volume": _row_value(row, "volume"),
+                    "trades": _row_value(row, "count"),
+                }
+                if ivl_ms < 86_400_000:
+                    bar_entry["time"] = _ms_to_clock(_row_value(row, "ms_of_day"))
+                bars.append(bar_entry)
+
+            if rollup_target:
+                bars = _rollup_daily_bars(bars, rollup_target)
+
+            if len(bars) > limit:
+                bars = bars[-limit:]
 
             return {
                 "option_ticker": option_ticker,
@@ -421,70 +659,63 @@ def register(
                 "date_to": date_to,
                 "bar_count": len(bars),
                 "bars": bars,
-                "source": "polygon.io",
+                "source": "thetadata",
             }
 
 
-def _normalize_polygon_contracts(
-    results: list[dict], data: dict
-) -> tuple[list[dict], float | None]:
-    """Normalize Polygon option snapshot results into our standard contract format."""
-    underlying_price = None
-    top_underlying = data.get("underlying_asset")
-    if isinstance(top_underlying, dict):
-        underlying_price = top_underlying.get("price")
-    if underlying_price is None:
-        for contract in results:
-            per_contract_underlying = contract.get("underlying_asset")
-            if isinstance(per_contract_underlying, dict) and per_contract_underlying.get("price") is not None:
-                underlying_price = per_contract_underlying.get("price")
-                break
-    if underlying_price is None:
-        strike_with_oi = [
-            (
-                (contract.get("open_interest") or 0),
-                (contract.get("details") or {}).get("strike_price"),
-            )
-            for contract in results
-            if isinstance((contract.get("details") or {}).get("strike_price"), (int, float))
-        ]
-        if strike_with_oi:
-            underlying_price = max(strike_with_oi, key=lambda row: row[0])[1]
+# ---------------------------------------------------------------------------
+# Week / month rollup from daily bars
+# ---------------------------------------------------------------------------
 
-    contracts: list[dict] = []
-    for contract in results:
-        details = contract.get("details", {})
-        greeks = contract.get("greeks", {})
-        day = contract.get("day", {})
-        last_quote = contract.get("last_quote", {})
 
-        entry = {
-            "ticker": details.get("ticker"),
-            "strike": details.get("strike_price"),
-            "type": details.get("contract_type"),
-            "expiration": details.get("expiration_date", "unknown"),
-            "greeks": {
-                "delta": greeks.get("delta"),
-                "gamma": greeks.get("gamma"),
-                "theta": greeks.get("theta"),
-                "vega": greeks.get("vega"),
-            },
-            "iv": contract.get("implied_volatility"),
-            "open_interest": contract.get("open_interest"),
-            "volume": day.get("volume"),
-            "last_price": day.get("close"),
-            "bid": last_quote.get("bid"),
-            "ask": last_quote.get("ask"),
-            "bid_size": last_quote.get("bid_size"),
-            "ask_size": last_quote.get("ask_size"),
-        }
-        mark = _option_mark(entry.get("bid"), entry.get("ask"), entry.get("last_price"))
-        if mark is not None:
-            entry["mark"] = mark
+def _rollup_daily_bars(bars: list[dict], target: str) -> list[dict]:
+    """Aggregate daily bars into ISO weeks ('week') or calendar months ('month')."""
+    if target not in ("week", "month") or not bars:
+        return bars
 
-        contracts.append(entry)
+    grouped: dict[str, list[dict]] = {}
+    for bar in bars:
+        date_str = bar.get("date")
+        if not date_str:
+            continue
+        try:
+            d = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if target == "week":
+            iso_year, iso_week, _ = d.isocalendar()
+            key = f"{iso_year}-W{iso_week:02d}"
+        else:
+            key = d.strftime("%Y-%m")
+        grouped.setdefault(key, []).append(bar)
 
-    return contracts, underlying_price
+    out: list[dict] = []
+    for key in sorted(grouped.keys()):
+        members = grouped[key]
+        if not members:
+            continue
+        opens = [m.get("open") for m in members if m.get("open") is not None]
+        highs = [m.get("high") for m in members if m.get("high") is not None]
+        lows = [m.get("low") for m in members if m.get("low") is not None]
+        closes = [m.get("close") for m in members if m.get("close") is not None]
+        volumes = [m.get("volume") or 0 for m in members]
+        trades = [m.get("trades") or 0 for m in members]
+        out.append({
+            "date": members[0].get("date"),
+            "period": key,
+            "open": opens[0] if opens else None,
+            "high": max(highs) if highs else None,
+            "low": min(lows) if lows else None,
+            "close": closes[-1] if closes else None,
+            "volume": sum(volumes),
+            "trades": sum(trades),
+        })
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Per-expiration grouping + summary helpers
+# ---------------------------------------------------------------------------
 
 
 def _build_chain_result(
@@ -496,7 +727,7 @@ def _build_chain_result(
     """Build the final grouped-by-expiration result from normalized contracts."""
     warnings: list[str] = []
 
-    # Check for stale quotes
+    # Stale-quote heuristic mirrors the original Polygon implementation.
     zero_bid_ask_count = sum(
         1 for c in contracts
         if (c.get("bid") or 0) == 0 and (c.get("ask") or 0) == 0
@@ -509,7 +740,6 @@ def _build_chain_result(
     if underlying_price is None:
         warnings.append("Unable to resolve underlying price; some computed fields are unavailable.")
 
-    # Add put selling metrics
     today_dt = date.today()
     for entry in contracts:
         if entry.get("type") == "put":
@@ -523,17 +753,14 @@ def _build_chain_result(
             if put_metrics is not None:
                 entry["put_selling"] = put_metrics
 
-    # Group by expiration
     by_expiration: dict[str, list[dict]] = {}
     for entry in contracts:
         exp = entry.get("expiration", "unknown")
         by_expiration.setdefault(exp, []).append(entry)
 
-    # Sort contracts within each expiration by strike
     for exp in by_expiration:
         by_expiration[exp].sort(key=lambda c: c.get("strike") or 0)
 
-    # Build per-expiration summaries
     expirations = []
     total_calls = 0
     total_puts = 0

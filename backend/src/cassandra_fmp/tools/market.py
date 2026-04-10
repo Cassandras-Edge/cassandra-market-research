@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
     from fmp_data import AsyncFMPDataClient
     from cassandra_fmp.clients.polygon import PolygonClient
+    from cassandra_fmp.clients.thetadata import ThetaDataClient
 
 
 PERIOD_DAYS = {
@@ -138,7 +139,13 @@ def _format_exposure(symbol: str, exposure: list, limit: int) -> dict:
     }
 
 
-def register(mcp: FastMCP, client: AsyncFMPDataClient, polygon_client: PolygonClient | None = None) -> None:
+def register(
+    mcp: FastMCP,
+    client: AsyncFMPDataClient,
+    polygon_client: PolygonClient | None = None,
+    *,
+    theta_client: ThetaDataClient | None = None,
+) -> None:
     @mcp.tool(
         annotations={
             "title": "Price History",
@@ -391,37 +398,54 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient, polygon_client: PolygonCl
         return result
 
     async def _fetch_options_oi(symbols: list[str]) -> dict[str, dict]:
-        """Fetch aggregate options OI for a list of symbols via Polygon.
+        """Fetch aggregate options OI for a list of symbols via ThetaData.
 
         Returns {symbol: {total_oi, call_oi, put_oi, put_call_ratio}} for
         each symbol where data is available.
         """
-        if not polygon_client:
+        if not theta_client:
             return {}
 
-        sem = asyncio.Semaphore(10)
+        sem = asyncio.Semaphore(5)
 
         async def _get_oi(sym: str) -> tuple[str, dict | None]:
             async with sem:
-                data = await polygon_client.get_safe(
-                    f"/v3/snapshot/options/{sym}",
-                    params={"limit": 250},
-                    cache_ttl=polygon_TTL_REALTIME,
+                # Pull all expirations and fan out OI snapshot requests.
+                # ThetaData Standard tier requires per-expiration calls; we
+                # cap at the next 8 expiries to keep this bounded for liquid
+                # underlyings.
+                expirations = await theta_client.list_expirations(sym)
+                if not expirations:
+                    return sym, None
+                today_str = date.today().strftime("%Y%m%d")
+                future = [e for e in expirations if e >= today_str][:8]
+                if not future:
+                    return sym, None
+
+                contracts = await theta_client.bulk_all_expirations(
+                    theta_client.bulk_snapshot_open_interest,
+                    sym,
+                    expirations=future,
+                    max_concurrency=4,
                 )
-            if not data or not isinstance(data, dict):
+
+            if not contracts:
                 return sym, None
-            results = data.get("results", [])
-            if not results:
-                return sym, None
+
             call_oi = 0
             put_oi = 0
-            for c in results:
-                oi = c.get("open_interest") or 0
-                ct = (c.get("details") or {}).get("contract_type", "")
-                if ct == "call":
-                    call_oi += oi
-                elif ct == "put":
-                    put_oi += oi
+            for entry in contracts:
+                contract_meta = entry.get("contract") or {}
+                right = (contract_meta.get("right") or "").upper()
+                ticks = entry.get("ticks") or []
+                if not ticks or not isinstance(ticks[0], list) or len(ticks[0]) < 2:
+                    continue
+                # open_interest is the second column in the bulk OI format
+                oi_value = ticks[0][1] or 0
+                if right == "C":
+                    call_oi += oi_value
+                elif right == "P":
+                    put_oi += oi_value
             total = call_oi + put_oi
             if total == 0:
                 return sym, None

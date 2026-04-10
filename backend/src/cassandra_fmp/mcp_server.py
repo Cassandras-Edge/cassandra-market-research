@@ -20,6 +20,7 @@ from fmp_data.config import ClientConfig, RateLimitConfig
 from cassandra_fmp.auth import McpKeyAuthProvider, build_auth
 from cassandra_mcp_auth import AclMiddleware
 from cassandra_fmp.clients.polygon import PolygonClient
+from cassandra_fmp.clients.thetadata import ThetaDataClient
 from cassandra_fmp.clients.treasury import TreasuryClient
 from cassandra_fmp.config import Settings
 from cassandra_fmp.tools import (
@@ -112,6 +113,10 @@ def create_mcp_server(settings: Settings) -> FastMCP:
     if polygon_api_key:
         polygon_client = PolygonClient(api_key=polygon_api_key)
 
+    theta_client: ThetaDataClient | None = None
+    if settings.theta_terminal_url:
+        theta_client = ThetaDataClient(base_url=settings.theta_terminal_url)
+
     @asynccontextmanager
     async def lifespan(server):
         yield
@@ -119,6 +124,8 @@ def create_mcp_server(settings: Settings) -> FastMCP:
         await treasury_client.close()
         if polygon_client is not None:
             await polygon_client.close()
+        if theta_client is not None:
+            await theta_client.close()
         if mcp_key_provider is not None:
             mcp_key_provider.close()
 
@@ -199,7 +206,7 @@ def create_mcp_server(settings: Settings) -> FastMCP:
     overview.register(mcp, client)
     financials.register(mcp, client)
     valuation.register(mcp, client)
-    market.register(mcp, client, polygon_client=polygon_client)
+    market.register(mcp, client, polygon_client=polygon_client, theta_client=theta_client)
     ownership.register(mcp, client, polygon_client=polygon_client)
     news.register(mcp, client)
     macro.register(mcp, client)
@@ -213,8 +220,10 @@ def create_mcp_server(settings: Settings) -> FastMCP:
     llm.register(mcp)
     meta.register(mcp, client)
 
+    if theta_client is not None:
+        options.register(mcp, theta_client=theta_client)
+
     if polygon_client is not None:
-        options.register(mcp, polygon_client=polygon_client)
         economy.register(mcp, polygon_client)
 
     # Tag tools for Code Mode category discovery (GetTags)
