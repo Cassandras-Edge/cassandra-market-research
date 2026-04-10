@@ -382,6 +382,62 @@ class ThetaDataClient:
     # Historical endpoints (single-contract queries)
     # ------------------------------------------------------------------
 
+    # ThetaData v3 caps intraday history (anything with an `interval` param)
+    # at 1 month per request. We chunk client-side so callers can pass
+    # arbitrary ranges without knowing the limit exists.
+    CHUNK_DAYS = 28
+
+    @staticmethod
+    def _split_date_range(start_date: str, end_date: str, chunk_days: int) -> list[tuple[str, str]]:
+        """Split a YYYYMMDD date range into ~chunk_days windows (inclusive)."""
+        try:
+            from datetime import datetime, timedelta  # noqa: PLC0415
+
+            start = datetime.strptime(start_date, "%Y%m%d").date()
+            end = datetime.strptime(end_date, "%Y%m%d").date()
+        except ValueError:
+            return [(start_date, end_date)]
+
+        if end < start:
+            return [(start_date, end_date)]
+
+        windows: list[tuple[str, str]] = []
+        cur = start
+        while cur <= end:
+            chunk_end = min(cur + timedelta(days=chunk_days - 1), end)
+            windows.append((cur.strftime("%Y%m%d"), chunk_end.strftime("%Y%m%d")))
+            cur = chunk_end + timedelta(days=1)
+        return windows
+
+    async def _chunked_history(
+        self,
+        path: str,
+        base_params: dict,
+        start_date: str,
+        end_date: str,
+        cache_ttl: int,
+    ) -> list[dict]:
+        """Fetch an intraday history endpoint across arbitrary date ranges.
+
+        ThetaData caps each request at 1 month. We split into ``CHUNK_DAYS``
+        windows and fire them in parallel, concatenating the flattened rows.
+        Single-chunk ranges take the direct path to avoid gather overhead.
+        """
+        windows = self._split_date_range(start_date, end_date, self.CHUNK_DAYS)
+        if len(windows) <= 1:
+            params = {**base_params, "start_date": start_date, "end_date": end_date}
+            return await self._get_flat(path, params=params, cache_ttl=cache_ttl)
+
+        async def _fetch(window_start: str, window_end: str) -> list[dict]:
+            params = {**base_params, "start_date": window_start, "end_date": window_end}
+            return await self._get_flat(path, params=params, cache_ttl=cache_ttl)
+
+        chunks = await asyncio.gather(*[_fetch(s, e) for s, e in windows])
+        out: list[dict] = []
+        for chunk in chunks:
+            out.extend(chunk)
+        return out
+
     async def history_eod(
         self,
         *,
@@ -423,21 +479,23 @@ class ThetaDataClient:
     ) -> list[dict]:
         """Intraday aggregated OHLC bars for a single contract.
 
-        Multi-day requests are limited to 1 month by the upstream API.
+        The upstream endpoint caps each request at ~1 month of data; this
+        method transparently chunks the range into 28-day windows and
+        gathers them in parallel.
         """
-        return await self._get_flat(
+        return await self._chunked_history(
             "/v3/option/history/ohlc",
-            params={
+            base_params={
                 "symbol": symbol,
                 "expiration": expiration,
                 "strike": strike,
                 "right": right,
-                "start_date": start_date,
-                "end_date": end_date,
                 "interval": interval,
                 "start_time": start_time,
                 "end_time": end_time,
             },
+            start_date=start_date,
+            end_date=end_date,
             cache_ttl=cache_ttl,
         )
 
@@ -455,20 +513,23 @@ class ThetaDataClient:
         end_time: str | None = None,
         cache_ttl: int = TTL_DAILY,
     ) -> list[dict]:
-        """Intraday NBBO bid/ask snapshots for a single contract."""
-        return await self._get_flat(
+        """Intraday NBBO bid/ask snapshots for a single contract.
+
+        Auto-chunks ranges >1 month into 28-day windows.
+        """
+        return await self._chunked_history(
             "/v3/option/history/quote",
-            params={
+            base_params={
                 "symbol": symbol,
                 "expiration": expiration,
                 "strike": strike,
                 "right": right,
-                "start_date": start_date,
-                "end_date": end_date,
                 "interval": interval,
                 "start_time": start_time,
                 "end_time": end_time,
             },
+            start_date=start_date,
+            end_date=end_date,
             cache_ttl=cache_ttl,
         )
 
@@ -541,20 +602,23 @@ class ThetaDataClient:
         end_time: str | None = None,
         cache_ttl: int = TTL_DAILY,
     ) -> list[dict]:
-        """Intraday first-order greeks (delta/gamma/theta/vega) + IV for a contract."""
-        return await self._get_flat(
+        """Intraday first-order greeks (delta/theta/vega/rho) + IV for a contract.
+
+        Auto-chunks ranges >1 month into 28-day windows.
+        """
+        return await self._chunked_history(
             "/v3/option/history/greeks/first_order",
-            params={
+            base_params={
                 "symbol": symbol,
                 "expiration": expiration,
                 "strike": strike,
                 "right": right,
-                "start_date": start_date,
-                "end_date": end_date,
                 "interval": interval,
                 "start_time": start_time,
                 "end_time": end_time,
             },
+            start_date=start_date,
+            end_date=end_date,
             cache_ttl=cache_ttl,
         )
 
@@ -572,20 +636,23 @@ class ThetaDataClient:
         end_time: str | None = None,
         cache_ttl: int = TTL_DAILY,
     ) -> list[dict]:
-        """Historical implied volatility (bid/mid/ask IV) for a contract."""
-        return await self._get_flat(
+        """Historical implied volatility (bid/mid/ask IV) for a contract.
+
+        Auto-chunks ranges >1 month into 28-day windows.
+        """
+        return await self._chunked_history(
             "/v3/option/history/greeks/implied_volatility",
-            params={
+            base_params={
                 "symbol": symbol,
                 "expiration": expiration,
                 "strike": strike,
                 "right": right,
-                "start_date": start_date,
-                "end_date": end_date,
                 "interval": interval,
                 "start_time": start_time,
                 "end_time": end_time,
             },
+            start_date=start_date,
+            end_date=end_date,
             cache_ttl=cache_ttl,
         )
 

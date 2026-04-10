@@ -1055,6 +1055,122 @@ def register(
 
     @mcp.tool(
         annotations={
+            "title": "Historical Option Daily",
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        }
+    )
+    async def historical_option_daily(
+        symbol: str,
+        expiration: str,
+        strike: float,
+        right: str,
+        date_from: str,
+        date_to: str,
+    ) -> dict:
+        """Daily EOD bars + greeks + IV + underlying price for an options contract.
+
+        Wraps ThetaData's ``/option/history/greeks/eod`` endpoint, which
+        returns one row per day containing: OHLCV, trade count, closing NBBO
+        bid/ask, first-order greeks (delta/gamma/theta/vega/rho), implied
+        vol, and underlying price. Unlike the intraday IV/greeks tools,
+        this endpoint has **no 1-month cap** — multi-year backtests and
+        long-range IV rank calculations just work in a single call.
+
+        Args:
+            symbol: Underlying ticker (e.g. "AAPL")
+            expiration: Contract expiration (YYYY-MM-DD)
+            strike: Strike price in dollars
+            right: "call" or "put"
+            date_from: Start date (YYYY-MM-DD) — no range cap
+            date_to: End date (YYYY-MM-DD)
+        """
+        params, err = await _resolve_contract_params(
+            symbol=symbol, expiration=expiration, strike=strike, right=right,
+        )
+        if err:
+            return err
+        assert params is not None
+
+        from_dt, from_err = _parse_iso_date(date_from, "date_from")
+        if from_err:
+            return {"error": from_err}
+        to_dt, to_err = _parse_iso_date(date_to, "date_to")
+        if to_err:
+            return {"error": to_err}
+        if from_dt is None or to_dt is None:
+            return {"error": "date_from and date_to are required"}
+
+        rows = await theta_client.history_greeks_eod(
+            symbol=params["symbol"],
+            expiration=params["expiration"],
+            strike=params["strike"],
+            right=params["right"],
+            start_date=_yyyymmdd(from_dt),
+            end_date=_yyyymmdd(to_dt),
+        )
+        if not rows:
+            return {"error": f"No daily data found for the specified contract and date range"}
+
+        points = [
+            {
+                "date": (r.get("timestamp") or "")[:10] if isinstance(r.get("timestamp"), str) else None,
+                "open": r.get("open"),
+                "high": r.get("high"),
+                "low": r.get("low"),
+                "close": r.get("close"),
+                "volume": r.get("volume"),
+                "trades": r.get("count"),
+                "closing_bid": r.get("bid"),
+                "closing_ask": r.get("ask"),
+                "closing_mid": _option_mark(r.get("bid"), r.get("ask"), r.get("close")),
+                "delta": r.get("delta"),
+                "gamma": r.get("gamma"),
+                "theta": r.get("theta"),
+                "vega": r.get("vega"),
+                "rho": r.get("rho"),
+                "implied_vol": r.get("implied_vol"),
+                "iv_error": r.get("iv_error"),
+                "underlying_price": r.get("underlying_price"),
+            }
+            for r in rows
+        ]
+
+        # Summary: IV rank/percentile from the returned series
+        mid_ivs = [p["implied_vol"] for p in points
+                   if isinstance(p["implied_vol"], (int, float)) and p["implied_vol"] > 0]
+        summary: dict[str, Any] = {"point_count": len(points)}
+        if mid_ivs:
+            iv_min = min(mid_ivs)
+            iv_max = max(mid_ivs)
+            iv_cur = mid_ivs[-1]
+            summary["iv_min"] = round(iv_min, 4)
+            summary["iv_max"] = round(iv_max, 4)
+            summary["iv_avg"] = round(sum(mid_ivs) / len(mid_ivs), 4)
+            summary["iv_first"] = round(mid_ivs[0], 4)
+            summary["iv_last"] = round(iv_cur, 4)
+            if iv_max > iv_min:
+                summary["iv_rank"] = round((iv_cur - iv_min) / (iv_max - iv_min) * 100, 1)
+            # IV percentile = % of days mid_iv was below current
+            below = sum(1 for v in mid_ivs if v < iv_cur)
+            summary["iv_percentile"] = round(below / len(mid_ivs) * 100, 1)
+
+        return {
+            "symbol": params["symbol"],
+            "expiration": expiration,
+            "strike": float(params["strike"]),
+            "right": params["right"],
+            "date_from": date_from,
+            "date_to": date_to,
+            "summary": summary,
+            "points": points,
+            "source": "thetadata",
+        }
+
+    @mcp.tool(
+        annotations={
             "title": "Option Quote At Time",
             "readOnlyHint": True,
             "destructiveHint": False,
