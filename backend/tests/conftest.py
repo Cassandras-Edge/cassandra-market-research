@@ -1298,3 +1298,55 @@ THETA_HIST_EOD_AAPL_270C = _v3_wrap([
         },
     ]),
 ])
+
+
+# Historical trade_quote for a single contract — used by option_trade_flow test
+THETA_TRADE_QUOTE_SPY_680C = _v3_wrap([
+    ({"symbol": "SPY", "expiration": "2030-04-17", "strike": 680.0, "right": "CALL"}, [
+        # Trade at ask = buyer aggressor
+        {
+            "trade_timestamp": "2030-04-09T09:35:12.123",
+            "sequence": 1, "condition": 0,
+            "ext_condition1": 0, "ext_condition2": 0, "ext_condition3": 0, "ext_condition4": 0,
+            "size": 50, "exchange": 34, "price": 5.20,
+            "bid_size": 100, "bid_exchange": 34, "bid": 5.10, "bid_condition": 0,
+            "ask_size": 80, "ask_exchange": 47, "ask": 5.20, "ask_condition": 0,
+        },
+        # Trade at bid = seller aggressor
+        {
+            "trade_timestamp": "2030-04-09T09:42:05.456",
+            "sequence": 2, "condition": 0,
+            "ext_condition1": 0, "ext_condition2": 0, "ext_condition3": 0, "ext_condition4": 0,
+            "size": 30, "exchange": 47, "price": 5.00,
+            "bid_size": 120, "bid_exchange": 34, "bid": 5.00, "bid_condition": 0,
+            "ask_size": 90, "ask_exchange": 47, "ask": 5.10, "ask_condition": 0,
+        },
+        # Trade between bid/ask = mid
+        {
+            "trade_timestamp": "2030-04-09T10:15:30.789",
+            "sequence": 3, "condition": 0,
+            "ext_condition1": 0, "ext_condition2": 0, "ext_condition3": 0, "ext_condition4": 0,
+            "size": 20, "exchange": 34, "price": 5.15,
+            "bid_size": 100, "bid_exchange": 34, "bid": 5.10, "bid_condition": 0,
+            "ask_size": 60, "ask_exchange": 47, "ask": 5.20, "ask_condition": 0,
+        },
+        # Trade above ask = buyer aggressor (crossed spread)
+        {
+            "trade_timestamp": "2030-04-09T10:31:00.000",
+            "sequence": 4, "condition": 0,
+            "ext_condition1": 0, "ext_condition2": 0, "ext_condition3": 0, "ext_condition4": 0,
+            "size": 100, "exchange": 34, "price": 5.30,
+            "bid_size": 80, "bid_exchange": 34, "bid": 5.15, "bid_condition": 0,
+            "ask_size": 50, "ask_exchange": 47, "ask": 5.25, "ask_condition": 0,
+        },
+        # Trade with zero bid/ask = unknown
+        {
+            "trade_timestamp": "2030-04-09T11:00:00.000",
+            "sequence": 5, "condition": 0,
+            "ext_condition1": 0, "ext_condition2": 0, "ext_condition3": 0, "ext_condition4": 0,
+            "size": 10, "exchange": 34, "price": 5.10,
+            "bid_size": 0, "bid_exchange": 0, "bid": 0, "bid_condition": 0,
+            "ask_size": 0, "ask_exchange": 0, "ask": 0, "ask_condition": 0,
+        },
+    ]),
+])

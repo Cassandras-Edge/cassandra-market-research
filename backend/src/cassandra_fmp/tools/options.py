@@ -1255,6 +1255,282 @@ def register(
             "source": "thetadata",
         }
 
+    # ------------------------------------------------------------------
+    # Trade flow — aggressor classification from tick-level trade_quote
+    # ------------------------------------------------------------------
+
+    @mcp.tool(
+        annotations={
+            "title": "Option Trade Flow",
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        }
+    )
+    async def option_trade_flow(
+        symbol: str,
+        expiration: str,
+        date: str,
+        strike: float | None = None,
+        strike_from: float | None = None,
+        strike_to: float | None = None,
+        right: str = "both",
+        bucket_minutes: int = 30,
+    ) -> dict:
+        """Tick-level trade flow with NBBO-based aggressor classification.
+
+        Fetches every OPRA trade for the given contract(s) on a single day,
+        paired with the NBBO at time of trade. Classifies each trade as
+        buyer-initiated (price >= ask), seller-initiated (price <= bid),
+        or indeterminate (between). Aggregates into time buckets and
+        per-strike summaries.
+
+        Use strike=None (default) to get all strikes on the expiration.
+        Use strike for a single strike, or strike_from/strike_to for a range.
+
+        Args:
+            symbol: Underlying ticker (e.g. "SPY")
+            expiration: Contract expiration (YYYY-MM-DD)
+            date: Trading date to analyze (YYYY-MM-DD)
+            strike: Single strike price (overrides strike_from/strike_to)
+            strike_from: Minimum strike price (inclusive)
+            strike_to: Maximum strike price (inclusive)
+            right: "call", "put", or "both" (default "both")
+            bucket_minutes: Time bucket size in minutes (default 30)
+        """
+        if theta_client is None:
+            return {"error": "ThetaData not configured"}
+
+        sym = (symbol or "").upper().strip()
+        if not sym:
+            return {"error": "symbol is required"}
+
+        exp_dt, exp_err = _parse_iso_date(expiration, "expiration")
+        if exp_err:
+            return {"error": exp_err}
+        if exp_dt is None:
+            return {"error": "expiration is required (YYYY-MM-DD)"}
+
+        date_dt, date_err = _parse_iso_date(date, "date")
+        if date_err:
+            return {"error": date_err}
+        if date_dt is None:
+            return {"error": "date is required (YYYY-MM-DD)"}
+
+        right_lower = (right or "both").lower().strip()
+        if right_lower not in ("call", "put", "both"):
+            return {"error": f"Invalid right '{right}'. Use 'call', 'put', or 'both'."}
+
+        # Determine strike param
+        if strike is not None:
+            strike_param = _strike_param(strike)
+        else:
+            strike_param = "*"
+
+        bucket_minutes = max(1, min(bucket_minutes, 390))
+        date_str = _yyyymmdd(date_dt)
+        exp_str = _yyyymmdd(exp_dt)
+
+        rows = await theta_client.history_trade_quote(
+            symbol=sym,
+            expiration=exp_str,
+            strike=strike_param,
+            right=right_lower if right_lower != "both" else "both",
+            start_date=date_str,
+            end_date=date_str,
+        )
+
+        if not rows:
+            return {
+                "error": f"No trade data found for {sym} {expiration} on {date}",
+                "hint": "ThetaData may not have tick data for this date yet, "
+                        "or the terminal may be unreachable.",
+            }
+
+        # Filter by strike range if specified
+        if strike is None and (strike_from is not None or strike_to is not None):
+            filtered = []
+            for r in rows:
+                s = r.get("strike")
+                if s is None:
+                    continue
+                try:
+                    sf = float(s)
+                except (TypeError, ValueError):
+                    continue
+                if strike_from is not None and sf < strike_from:
+                    continue
+                if strike_to is not None and sf > strike_to:
+                    continue
+                filtered.append(r)
+            rows = filtered
+
+        # Classify each trade
+        trades: list[dict] = []
+        for r in rows:
+            price = r.get("price")
+            size = r.get("size")
+            bid = r.get("bid")
+            ask = r.get("ask")
+            if price is None or size is None:
+                continue
+            try:
+                price_f = float(price)
+                size_i = int(size)
+                bid_f = float(bid) if bid is not None else 0.0
+                ask_f = float(ask) if ask is not None else 0.0
+            except (TypeError, ValueError):
+                continue
+            if size_i <= 0 or price_f <= 0:
+                continue
+
+            # Aggressor classification
+            if bid_f <= 0 or ask_f <= 0:
+                side = "unknown"
+            elif price_f >= ask_f:
+                side = "buy"
+            elif price_f <= bid_f:
+                side = "sell"
+            else:
+                side = "mid"
+
+            s_raw = r.get("strike")
+            try:
+                strike_f = float(s_raw) if s_raw is not None else None
+            except (TypeError, ValueError):
+                strike_f = None
+
+            ct = _normalize_contract_type(r.get("right"))
+            ts = r.get("trade_timestamp") or r.get("timestamp") or ""
+
+            trades.append({
+                "price": price_f,
+                "size": size_i,
+                "side": side,
+                "strike": strike_f,
+                "right": ct,
+                "dollars": round(price_f * size_i * 100, 2),
+                "timestamp": ts,
+                "bid": bid_f,
+                "ask": ask_f,
+                "exchange": r.get("exchange"),
+                "condition": r.get("condition"),
+            })
+
+        if not trades:
+            return {"error": f"No valid trades found for {sym} {expiration} on {date}"}
+
+        # --- Aggregate by strike ---
+        by_strike: dict[tuple, dict] = {}
+        for t in trades:
+            key = (t["strike"], t["right"])
+            if key not in by_strike:
+                by_strike[key] = {
+                    "strike": t["strike"], "right": t["right"],
+                    "buy_vol": 0, "sell_vol": 0, "mid_vol": 0, "unknown_vol": 0,
+                    "buy_dollars": 0.0, "sell_dollars": 0.0,
+                    "trade_count": 0,
+                }
+            b = by_strike[key]
+            b["trade_count"] += 1
+            b[f"{t['side']}_vol"] += t["size"]
+            if t["side"] in ("buy", "sell"):
+                b[f"{t['side']}_dollars"] += t["dollars"]
+
+        strike_summary = sorted(by_strike.values(), key=lambda x: (x["strike"] or 0))
+        for s in strike_summary:
+            s["net_vol"] = s["buy_vol"] - s["sell_vol"]
+            s["net_dollars"] = round(s["buy_dollars"] - s["sell_dollars"], 2)
+            total = s["buy_vol"] + s["sell_vol"]
+            if total > 0:
+                buy_pct = s["buy_vol"] / total
+                if buy_pct >= 0.6:
+                    s["signal"] = "buy_dominant"
+                elif buy_pct <= 0.4:
+                    s["signal"] = "sell_dominant"
+                else:
+                    s["signal"] = "neutral"
+            else:
+                s["signal"] = "unknown"
+            s["buy_dollars"] = round(s["buy_dollars"], 2)
+            s["sell_dollars"] = round(s["sell_dollars"], 2)
+
+        # --- Aggregate by time bucket ---
+        def _bucket_key(ts: str) -> str:
+            """Parse timestamp and bucket into N-minute windows."""
+            if not ts:
+                return "unknown"
+            try:
+                # v3 timestamps: "2026-04-09T10:30:00" or similar ISO
+                if "T" in ts:
+                    time_part = ts.split("T")[1][:8]
+                else:
+                    time_part = ts[:8]
+                parts = time_part.split(":")
+                h, m = int(parts[0]), int(parts[1])
+                total_min = h * 60 + m
+                bucket_start = (total_min // bucket_minutes) * bucket_minutes
+                bh, bm = divmod(bucket_start, 60)
+                bucket_end = bucket_start + bucket_minutes
+                eh, em = divmod(bucket_end, 60)
+                return f"{bh:02d}:{bm:02d}-{eh:02d}:{em:02d}"
+            except (ValueError, IndexError):
+                return "unknown"
+
+        by_time: dict[str, dict] = {}
+        for t in trades:
+            bk = _bucket_key(t["timestamp"])
+            if bk not in by_time:
+                by_time[bk] = {
+                    "bucket": bk,
+                    "buy_vol": 0, "sell_vol": 0, "mid_vol": 0, "unknown_vol": 0,
+                    "buy_dollars": 0.0, "sell_dollars": 0.0,
+                    "trade_count": 0,
+                }
+            b = by_time[bk]
+            b["trade_count"] += 1
+            b[f"{t['side']}_vol"] += t["size"]
+            if t["side"] in ("buy", "sell"):
+                b[f"{t['side']}_dollars"] += t["dollars"]
+
+        time_summary = sorted(by_time.values(), key=lambda x: x["bucket"])
+        for b in time_summary:
+            b["net_vol"] = b["buy_vol"] - b["sell_vol"]
+            b["net_dollars"] = round(b["buy_dollars"] - b["sell_dollars"], 2)
+            b["buy_dollars"] = round(b["buy_dollars"], 2)
+            b["sell_dollars"] = round(b["sell_dollars"], 2)
+
+        # --- Totals ---
+        total_buy = sum(t["size"] for t in trades if t["side"] == "buy")
+        total_sell = sum(t["size"] for t in trades if t["side"] == "sell")
+        total_mid = sum(t["size"] for t in trades if t["side"] == "mid")
+        total_unknown = sum(t["size"] for t in trades if t["side"] == "unknown")
+        total_buy_dollars = round(sum(t["dollars"] for t in trades if t["side"] == "buy"), 2)
+        total_sell_dollars = round(sum(t["dollars"] for t in trades if t["side"] == "sell"), 2)
+
+        return {
+            "symbol": sym,
+            "expiration": expiration,
+            "date": date,
+            "trade_count": len(trades),
+            "total_volume": total_buy + total_sell + total_mid + total_unknown,
+            "net_flow": {
+                "buy": total_buy,
+                "sell": total_sell,
+                "mid": total_mid,
+                "unknown": total_unknown,
+            },
+            "net_premium": {
+                "buy_dollars": total_buy_dollars,
+                "sell_dollars": total_sell_dollars,
+                "net_dollars": round(total_buy_dollars - total_sell_dollars, 2),
+            },
+            "by_strike": strike_summary,
+            "by_time": time_summary,
+            "source": "thetadata",
+        }
+
 
 # ---------------------------------------------------------------------------
 # Week / month rollup from daily bars

@@ -37,6 +37,7 @@ from tests.conftest import (
     THETA_AAPL_STALE_OI_SNAPSHOT,
     THETA_AAPL_STALE_OHLC_SNAPSHOT,
     THETA_HIST_EOD_AAPL_270C,
+    THETA_TRADE_QUOTE_SPY_680C,
 )
 
 BASE_FMP = "https://financialmodelingprep.com"
@@ -807,3 +808,133 @@ class TestOwnershipStructurePolygon:
         assert "polygon_short_interest" in data
         assert data["polygon_short_interest"]["source"] == "polygon.io"
         await fmp.aclose()
+
+
+class TestOptionTradeFlow:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_aggressor_classification(self):
+        """Trades at ask=buy, at bid=sell, between=mid, zero quote=unknown."""
+        respx.get(f"{BASE_THETA}/v3/option/history/trade_quote").mock(
+            return_value=httpx.Response(200, json=THETA_TRADE_QUOTE_SPY_680C)
+        )
+
+        mcp, tc = _make_options_server()
+        async with Client(mcp) as c:
+            result = await c.call_tool(
+                "option_trade_flow",
+                {
+                    "symbol": "SPY",
+                    "expiration": "2030-04-17",
+                    "date": "2030-04-09",
+                    "strike": 680.0,
+                    "right": "call",
+                },
+            )
+
+        data = result.data
+        assert data["source"] == "thetadata"
+        assert data["symbol"] == "SPY"
+        assert data["trade_count"] == 5
+
+        # 2 buys (at ask + above ask): 50 + 100 = 150
+        assert data["net_flow"]["buy"] == 150
+        # 1 sell (at bid): 30
+        assert data["net_flow"]["sell"] == 30
+        # 1 mid: 20
+        assert data["net_flow"]["mid"] == 20
+        # 1 unknown (zero bid/ask): 10
+        assert data["net_flow"]["unknown"] == 10
+
+        assert data["total_volume"] == 210
+        assert data["net_premium"]["net_dollars"] > 0
+
+        # Check by_strike has exactly one entry (single strike queried)
+        assert len(data["by_strike"]) == 1
+        s = data["by_strike"][0]
+        assert s["strike"] == 680.0
+        assert s["buy_vol"] == 150
+        assert s["sell_vol"] == 30
+        assert s["signal"] == "buy_dominant"
+
+        # Check by_time buckets exist
+        assert len(data["by_time"]) >= 1
+        await tc.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_dollar_flow_math(self):
+        """Dollar flow = price * size * 100 for each side."""
+        respx.get(f"{BASE_THETA}/v3/option/history/trade_quote").mock(
+            return_value=httpx.Response(200, json=THETA_TRADE_QUOTE_SPY_680C)
+        )
+
+        mcp, tc = _make_options_server()
+        async with Client(mcp) as c:
+            result = await c.call_tool(
+                "option_trade_flow",
+                {
+                    "symbol": "SPY",
+                    "expiration": "2030-04-17",
+                    "date": "2030-04-09",
+                    "strike": 680.0,
+                    "right": "call",
+                },
+            )
+
+        data = result.data
+        # Buy trades: 50*5.20*100 + 100*5.30*100 = 26000 + 53000 = 79000
+        assert data["net_premium"]["buy_dollars"] == 79000.0
+        # Sell trades: 30*5.00*100 = 15000
+        assert data["net_premium"]["sell_dollars"] == 15000.0
+        assert data["net_premium"]["net_dollars"] == 64000.0
+        await tc.close()
+
+    @pytest.mark.asyncio
+    async def test_invalid_params(self):
+        """Bad symbol / expiration returns error."""
+        mcp, tc = _make_options_server()
+        async with Client(mcp) as c:
+            result = await c.call_tool(
+                "option_trade_flow",
+                {
+                    "symbol": "",
+                    "expiration": "2030-04-17",
+                    "date": "2030-04-09",
+                },
+            )
+        data = result.data
+        assert "error" in data
+        await tc.close()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_time_bucketing(self):
+        """Trades in different half-hours land in correct buckets."""
+        respx.get(f"{BASE_THETA}/v3/option/history/trade_quote").mock(
+            return_value=httpx.Response(200, json=THETA_TRADE_QUOTE_SPY_680C)
+        )
+
+        mcp, tc = _make_options_server()
+        async with Client(mcp) as c:
+            result = await c.call_tool(
+                "option_trade_flow",
+                {
+                    "symbol": "SPY",
+                    "expiration": "2030-04-17",
+                    "date": "2030-04-09",
+                    "strike": 680.0,
+                    "right": "call",
+                    "bucket_minutes": 30,
+                },
+            )
+
+        data = result.data
+        buckets = {b["bucket"]: b for b in data["by_time"]}
+        # 09:35 and 09:42 → "09:30-10:00" bucket
+        assert "09:30-10:00" in buckets
+        b = buckets["09:30-10:00"]
+        assert b["buy_vol"] == 50  # 09:35 trade
+        assert b["sell_vol"] == 30  # 09:42 trade
+        assert b["trade_count"] == 2
+        await tc.close()

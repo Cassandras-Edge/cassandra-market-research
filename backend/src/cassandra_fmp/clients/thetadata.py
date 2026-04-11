@@ -533,6 +533,42 @@ class ThetaDataClient:
             cache_ttl=cache_ttl,
         )
 
+    async def history_trade_quote(
+        self,
+        *,
+        symbol: str,
+        expiration: str,
+        strike: str = "*",
+        right: str = "both",
+        start_date: str,
+        end_date: str,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        cache_ttl: int = TTL_DAILY,
+    ) -> list[dict]:
+        """Every OPRA trade paired with the NBBO at time of trade.
+
+        Returns tick-level data: trade price/size/exchange/conditions plus
+        the contemporaneous bid/ask/sizes. Use strike="*" to get all strikes
+        on the expiration.
+
+        Auto-chunks ranges >1 month into 28-day windows.
+        """
+        return await self._chunked_history(
+            "/v3/option/history/trade_quote",
+            base_params={
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": strike,
+                "right": right,
+                "start_time": start_time,
+                "end_time": end_time,
+            },
+            start_date=start_date,
+            end_date=end_date,
+            cache_ttl=cache_ttl,
+        )
+
     async def history_open_interest(
         self,
         *,
