@@ -782,6 +782,129 @@ def register(
 
     @mcp.tool(
         annotations={
+            "title": "Historical Option Trades",
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        }
+    )
+    async def historical_option_trades(
+        symbol: str,
+        expiration: str,
+        strike: float,
+        right: str,
+        date_from: str,
+        date_to: str,
+        start_time: str | None = None,
+        end_time: str | None = None,
+    ) -> dict:
+        """Get tick-level trades for an options contract, paired with NBBO at time of trade.
+
+        Returns every OPRA trade with price, size, exchange, condition codes,
+        and the contemporaneous NBBO bid/ask. Each trade is also classified as
+        buyer-initiated (price >= ask), seller-initiated (price <= bid), or
+        indeterminate. Multi-day requests are capped at 1 month.
+
+        Args:
+            symbol: Underlying ticker (e.g. "AAPL")
+            expiration: Contract expiration (YYYY-MM-DD)
+            strike: Strike price in dollars
+            right: "call" or "put"
+            date_from: Start date (YYYY-MM-DD)
+            date_to: End date (YYYY-MM-DD)
+            start_time: Start time filter (HH:MM:SS, e.g. "09:30:00")
+            end_time: End time filter (HH:MM:SS, e.g. "16:00:00")
+        """
+        params, err = await _resolve_contract_params(
+            symbol=symbol, expiration=expiration, strike=strike, right=right,
+        )
+        if err:
+            return err
+        assert params is not None
+
+        from_dt, from_err = _parse_iso_date(date_from, "date_from")
+        if from_err:
+            return {"error": from_err}
+        to_dt, to_err = _parse_iso_date(date_to, "date_to")
+        if to_err:
+            return {"error": to_err}
+        if from_dt is None or to_dt is None:
+            return {"error": "date_from and date_to are required"}
+        if from_dt > to_dt:
+            return {"error": "date_from must be <= date_to"}
+
+        if theta_client is None:
+            return {"error": "ThetaData not configured"}
+
+        rows = await theta_client.history_trade_quote(
+            symbol=params["symbol"],
+            expiration=params["expiration"],
+            strike=params["strike"],
+            right=params["right"],
+            start_date=_yyyymmdd(from_dt),
+            end_date=_yyyymmdd(to_dt),
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+        if not rows:
+            return {
+                "error": f"No trade data found for {params['symbol']} {params['expiration']} "
+                         f"{params['strike']} {params['right']} from {date_from} to {date_to}",
+            }
+
+        trades = []
+        for r in rows:
+            price = r.get("price")
+            size = r.get("size")
+            bid = r.get("bid")
+            ask = r.get("ask")
+            if price is None or size is None:
+                continue
+            try:
+                pf = float(price)
+                bf = float(bid) if bid is not None else 0.0
+                af = float(ask) if ask is not None else 0.0
+            except (TypeError, ValueError):
+                continue
+
+            if bf <= 0 or af <= 0:
+                side = "unknown"
+            elif pf >= af:
+                side = "buy"
+            elif pf <= bf:
+                side = "sell"
+            else:
+                side = "mid"
+
+            trades.append({
+                "timestamp": r.get("trade_timestamp") or r.get("timestamp"),
+                "price": price,
+                "size": size,
+                "side": side,
+                "bid": bid,
+                "ask": ask,
+                "exchange": r.get("exchange"),
+                "condition": r.get("condition"),
+                "bid_size": r.get("bid_size"),
+                "ask_size": r.get("ask_size"),
+            })
+
+        return {
+            "symbol": params["symbol"],
+            "expiration": expiration,
+            "strike": float(params["strike"]),
+            "right": params["right"],
+            "date_from": date_from,
+            "date_to": date_to,
+            "trade_count": len(trades),
+            "trades": trades,
+            "source": "thetadata",
+        }
+
+    @mcp.tool(
+        annotations={
             "title": "Historical Option Implied Volatility",
             "readOnlyHint": True,
             "destructiveHint": False,
