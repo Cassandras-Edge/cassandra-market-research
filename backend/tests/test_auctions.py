@@ -7,7 +7,7 @@ import respx
 import httpx
 
 from fastmcp import FastMCP, Client
-from cassandra_fmp.clients.treasury import TreasuryClient
+from cass_market_sdk.clients.treasury import TreasuryClient
 from cassandra_fmp.tools.auctions import register as register_auctions
 
 TREASURY_BASE = "https://api.fiscaldata.treasury.gov"

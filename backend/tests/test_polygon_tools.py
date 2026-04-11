@@ -8,8 +8,8 @@ import respx
 
 from fastmcp import FastMCP, Client
 from fmp_data import AsyncFMPDataClient
-from cassandra_fmp.clients.polygon import PolygonClient
-from cassandra_fmp.clients.thetadata import ThetaDataClient
+from cass_market_sdk.clients.polygon import PolygonClient
+from cass_market_sdk.clients.thetadata import ThetaDataClient
 from tests.conftest import build_test_client, THETA_TEST_URL
 from cassandra_fmp.tools.options import register as register_options
 from cassandra_fmp.tools.economy import register as register_economy

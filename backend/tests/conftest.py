@@ -9,8 +9,8 @@ from pydantic import ValidationError as PydanticValidationError
 from fmp_data import AsyncFMPDataClient
 from fmp_data.base import BaseClient
 from fmp_data.config import ClientConfig, RateLimitConfig
-from cassandra_fmp.clients.polygon import PolygonClient
-from cassandra_fmp.clients.thetadata import ThetaDataClient
+from cass_market_sdk.clients.polygon import PolygonClient
+from cass_market_sdk.clients.thetadata import ThetaDataClient
 from cassandra_fmp.tools._helpers import _CACHE
 
 
