@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import toon
-from cassandra_fmp.clients.polygon import PolygonClient as _PolygonClientRuntime
+from cass_market_sdk.clients.polygon import PolygonClient as _PolygonClientRuntime
 from cassandra_fmp.tools._helpers import (
     TTL_12H,
     TTL_6H,
@@ -30,8 +30,8 @@ _EST = ZoneInfo("America/New_York")
 if TYPE_CHECKING:
     from fastmcp import FastMCP
     from fmp_data import AsyncFMPDataClient
-    from cassandra_fmp.clients.polygon import PolygonClient
-    from cassandra_fmp.clients.thetadata import ThetaDataClient
+    from cass_market_sdk.clients.polygon import PolygonClient
+    from cass_market_sdk.clients.thetadata import ThetaDataClient
 
 
 PERIOD_DAYS = {

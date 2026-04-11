@@ -19,9 +19,9 @@ from fmp_data.config import ClientConfig, RateLimitConfig
 
 from cassandra_fmp.auth import McpKeyAuthProvider, build_auth
 from cassandra_mcp_auth import AclMiddleware
-from cassandra_fmp.clients.polygon import PolygonClient
-from cassandra_fmp.clients.thetadata import ThetaDataClient
-from cassandra_fmp.clients.treasury import TreasuryClient
+from cass_market_sdk.clients.polygon import PolygonClient
+from cass_market_sdk.clients.thetadata import ThetaDataClient
+from cass_market_sdk.clients.treasury import TreasuryClient
 from cassandra_fmp.config import Settings
 from cassandra_fmp.tools import (
     assets,

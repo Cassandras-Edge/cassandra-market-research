@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
-    from cassandra_fmp.clients.polygon import PolygonClient
+    from cass_market_sdk.clients.polygon import PolygonClient
 
 VALID_CATEGORIES = {"inflation", "labor", "rates", "all"}
 

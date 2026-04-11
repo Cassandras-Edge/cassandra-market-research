@@ -8,13 +8,13 @@ from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
 import httpx
-from cassandra_fmp.clients.polygon import PolygonClient as _PolygonClientRuntime
+from cass_market_sdk.clients.polygon import PolygonClient as _PolygonClientRuntime
 from cassandra_fmp.tools._helpers import TTL_DAILY, TTL_HOURLY, TTL_REALTIME, _as_dict, _as_list, _date_only, _safe_call
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
     from fmp_data import AsyncFMPDataClient
-    from cassandra_fmp.clients.polygon import PolygonClient
+    from cass_market_sdk.clients.polygon import PolygonClient
 
 FINRA_URL = "https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest"
 polygon_TTL_HOURLY = _PolygonClientRuntime.TTL_HOURLY

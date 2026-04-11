@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
-    from cassandra_fmp.clients.treasury import TreasuryClient
+    from cass_market_sdk.clients.treasury import TreasuryClient
 
 
 # ---------------------------------------------------------------------------
