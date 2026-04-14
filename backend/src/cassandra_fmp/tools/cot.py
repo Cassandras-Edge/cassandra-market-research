@@ -143,11 +143,12 @@ def register(mcp: FastMCP) -> None:
         """
         if not from_date:
             from_date = (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%d")
+        if not to_date:
+            to_date = datetime.now().strftime("%Y-%m-%d")
 
         params: dict = {"symbol": symbol.upper()}
         params["from"] = from_date
-        if to_date:
-            params["to"] = to_date
+        params["to"] = to_date
 
         try:
             data = await _fmp_get("commitment-of-traders-report", params)
@@ -199,54 +200,6 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool(
         annotations={
-            "title": "COT Analysis",
-            "readOnlyHint": True,
-            "destructiveHint": False,
-            "idempotentHint": True,
-            "openWorldHint": True,
-        }
-    )
-    async def cot_analysis(
-        symbol: str,
-        from_date: str | None = None,
-        to_date: str | None = None,
-    ) -> dict:
-        """Get pre-computed COT analysis from FMP.
-
-        Returns the FMP analysis report which includes net position
-        percentages, week-over-week changes, and market sentiment
-        metrics. Complements cot_report by providing FMP's own
-        analytical layer on top of the raw CFTC data.
-
-        Args:
-            symbol: Futures symbol (e.g. 'GC' for gold, 'CL' for crude oil).
-            from_date: Start date (YYYY-MM-DD). Defaults to ~1 year ago.
-            to_date: End date (YYYY-MM-DD). Defaults to latest available.
-        """
-        if not from_date:
-            from_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
-
-        params: dict = {"symbol": symbol.upper()}
-        params["from"] = from_date
-        if to_date:
-            params["to"] = to_date
-
-        try:
-            data = await _fmp_get("commitment-of-traders-report-analysis", params)
-        except httpx.HTTPError as e:
-            return {"error": f"COT analysis request failed: {e}"}
-
-        if not isinstance(data, list) or not data:
-            return {"error": f"No COT analysis data for '{symbol}'"}
-
-        return {
-            "symbol": symbol.upper(),
-            "report_count": len(data),
-            "reports": data,
-        }
-
-    @mcp.tool(
-        annotations={
             "title": "COT Symbols",
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -260,14 +213,15 @@ def register(mcp: FastMCP) -> None:
         """List available COT report symbols.
 
         Returns all symbols that have COT data, grouped by sector.
-        Use this to discover valid symbols for cot_report and cot_analysis.
+        Use this to discover valid symbols for cot_report.
 
         Args:
-            sector: Optional sector filter (e.g. 'METALS', 'ENERGY',
-                'AGRICULTURE', 'FINANCIAL'). Case-insensitive.
+            sector: Optional sector filter (e.g. 'METALS', 'ENERGIES',
+                'GRAINS', 'FINANCIALS', 'CURRENCIES', 'INDICES',
+                'SOFTS', 'MEATS'). Case-insensitive.
         """
         try:
-            data = await _fmp_get("commitment-of-traders-report/list")
+            data = await _fmp_get("commitment-of-traders-report")
         except httpx.HTTPError as e:
             return {"error": f"COT symbols request failed: {e}"}
 
