@@ -228,14 +228,19 @@ def register(mcp: FastMCP) -> None:
         if not isinstance(data, list) or not data:
             return {"error": "No COT symbols available"}
 
-        # Group by sector
+        # Group by sector, deduplicate (API returns one row per report date)
+        seen: set[str] = set()
         by_sector: dict[str, list[dict]] = {}
         for row in data:
+            sym = row.get("shortName") or row.get("symbol")
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
             s = row.get("sector", "OTHER")
             if sector and s.upper() != sector.upper():
                 continue
             by_sector.setdefault(s, []).append({
-                "symbol": row.get("shortName") or row.get("symbol"),
+                "symbol": sym,
                 "name": row.get("name"),
             })
 
