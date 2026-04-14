@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import httpx
@@ -81,7 +82,7 @@ def register(mcp: FastMCP) -> None:
         }
     )
     async def esg_benchmark(
-        year: int = 2023,
+        year: int | None = None,
     ) -> dict:
         """Get ESG benchmark scores by sector for a given year.
 
@@ -90,8 +91,11 @@ def register(mcp: FastMCP) -> None:
         against its sector peers.
 
         Args:
-            year: Fiscal year for benchmark data (default: 2023).
+            year: Fiscal year for benchmark data. Defaults to prior year
+                (ESG data typically lags by ~1 year).
         """
+        if year is None:
+            year = datetime.now().year - 1
         try:
             data = await _fmp_get("esg-benchmark", {"year": year})
         except httpx.HTTPError as e:

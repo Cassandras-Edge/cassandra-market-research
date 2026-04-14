@@ -307,6 +307,8 @@ _TOOL_TAGS: dict[str, set[str]] = {
     "auction_analysis": {"fixed-income"},
     # cot
     "cot_report": {"commodities", "fixed-income"},
+    "cot_analysis": {"commodities", "fixed-income"},
+    "cot_symbols": {"commodities", "fixed-income"},
     # esg
     "esg_ratings": {"esg"},
     "esg_benchmark": {"esg"},
