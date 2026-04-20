@@ -41,7 +41,6 @@ from cassandra_fmp.tools import (
     options,
     overview,
     ownership,
-    scanner,
     transcripts,
     valuation,
     workflows,
@@ -233,7 +232,6 @@ def create_mcp_server(settings: Settings) -> FastMCP:
         polygon_client=polygon_client,
         theta_client=theta_client,
         tv_ws=tv_ws_client,
-        tv_proxy=tv_proxy_client,
     )
     ownership.register(mcp, client, polygon_client=polygon_client)
     news.register(mcp, client, tv_proxy=tv_proxy_client)
@@ -253,9 +251,6 @@ def create_mcp_server(settings: Settings) -> FastMCP:
 
     if polygon_client is not None:
         economy.register(mcp, polygon_client)
-
-    # TV-scanner-backed analytical tools. No-op when tv_proxy_client is None.
-    scanner.register(mcp, tv_proxy=tv_proxy_client)
 
     # Tag tools for Code Mode category discovery (GetTags)
     _apply_tags(mcp)
@@ -358,16 +353,8 @@ _TOOL_TAGS: dict[str, set[str]] = {
     "analyst_consensus": {"earnings", "valuation"},
     # etf
     "etf_lookup": {"overview"},
-    # screener + scanner-backed analytics (TV-backed; register only when TV proxy configured)
+    # screener (TV-backed; registered only when TV proxy is configured)
     "screener": {"screening", "market"},
-    "screener_columns": {"screening", "meta"},
-    "technical_rating": {"market", "technicals"},
-    "perf_matrix": {"market", "price"},
-    "fundamentals_matrix": {"valuation", "financials"},
-    "proximity_scan": {"screening", "market"},
-    "pattern_scan": {"screening", "technicals"},
-    "premarket_movers": {"screening", "market"},
-    "relative_volume_leaders": {"screening", "market"},
 }
 
 

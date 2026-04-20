@@ -106,15 +106,5 @@ When `TV_PROXY_HTTP_URL`/`TV_PROXY_WS_URL` + `TV_PROXY_MCP_KEY` are set, TV data
 - `symbol_lookup` (name type) — TV fallback when FMP returns nothing. Unlocks futures continuations (`CL1!`), global indices (`DAX`), non-US equities, and per-exchange crypto composites.
 - `price_history` — TV fallback when FMP has no bars *or* when the symbol is an obviously TV-only shape (contains `:` or `!`). Raw OHLCV from TV is reshaped through the same analysis pipeline (SMA-50/200, perf, volatility).
 - `screener` — filter-based stock discovery tool. Arbitrary filter JSON over 200+ TV scanner columns (technicals + fundamentals + dividend / sentiment). Only registered when TV proxy is configured. Pair with `symbol_lookup` for plain name-based resolution.
-- `scanner` module (all TV-scanner-backed, register only when TV proxy is configured):
-  - `technical_rating(symbol)` — TV's composite Recommend.All + MA / oscillator sub-scores + 26 raw indicators.
-  - `perf_matrix(symbols, timeframes)` — N × M rolling-perf comp (1D / 1W / 1M / 3M / 6M / YTD / 1Y / 5Y / ALL) in one call.
-  - `fundamentals_matrix(symbols, metrics)` — N × M valuation/profitability/leverage/growth/dividends/size comp; 7 preset groups.
-  - `proximity_scan(side, threshold_pct)` — names within N% of a 52w / ATH / monthly extreme. 10 sides (ath/atl/52w/1m/3m/6m × high/low).
-  - `pattern_scan(patterns, bias, timeframe)` — 27 candlestick patterns × 10 timeframes; multi-pattern clusters rank first.
-  - `premarket_movers(session, min_change_pct)` — pre / after-hours gap leaders. No FMP equivalent.
-  - `relative_volume_leaders(min_rvol)` — unusual-volume catalyst detector. Ranks by `today_volume / 10d_avg`.
-  - `screener_columns(query)` — searchable catalog of TV's 3500+ scanner columns (24h cache). Makes filter composition for `screener` / `perf_matrix` / `fundamentals_matrix` discoverable.
-- `earnings_calendar` — now enriched with TV's prior-quarter EPS + revenue surprise percents when the TV proxy is configured (alongside existing FMP date/estimate + Polygon options OI enrichment).
 
-Account-mutating TV operations (alerts, watchlists) stay in `cassandra-tradingview-mcp` behind its owner-only ACL. Raw TV primitives (`search_symbols`, `screen_stocks`, `get_quote`, `get_candles`, `get_news`, `get_economic_events`) also remain there as the direct-passthrough surface.
+Account-mutating TV operations (alerts, watchlists) stay in `cassandra-tradingview-mcp` behind its owner-only ACL.
