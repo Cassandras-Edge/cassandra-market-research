@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import date, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import toon
 from fmp_data.models import APIVersion, Endpoint, EndpointParam, ParamLocation, ParamType
@@ -27,10 +26,6 @@ from cassandra_fmp.tools._helpers import (
 if TYPE_CHECKING:
     from fmp_data import AsyncFMPDataClient
     from fastmcp import FastMCP
-    from cass_market_sdk.clients.tv_proxy import TvProxyClient
-
-
-logger = logging.getLogger(__name__)
 
 # Custom endpoints not yet in fmp-data SDK
 CROWDFUNDING_LATEST = Endpoint(
@@ -236,84 +231,7 @@ async def _fetch_movers_with_mcap(client: "AsyncFMPDataClient") -> tuple[list, l
     )
 
 
-async def _fetch_tv_events(
-    proxy: "TvProxyClient",
-    *,
-    start: date,
-    end: date,
-) -> list[dict[str, Any]]:
-    """Pull economic-calendar events from TradingView, shaped to FMP schema."""
-    params: dict[str, Any] = {
-        "from": f"{start.isoformat()}T00:00:00Z",
-        "to": f"{end.isoformat()}T23:59:59Z",
-    }
-    try:
-        data = await proxy.get_json("economic-calendar", "/events", params=params)
-    except Exception as e:  # noqa: BLE001
-        logger.debug("TV calendar fetch failed (degrading to FMP-only): %s", e)
-        return []
-
-    items = data.get("result") if isinstance(data, dict) else data
-    if not isinstance(items, list):
-        return []
-
-    shaped: list[dict[str, Any]] = []
-    for ev in items:
-        # TV importance: 0 low, 1 medium, 2 high. Map to FMP's impact string.
-        tv_imp = ev.get("importance", 0)
-        impact = "High" if tv_imp >= 2 else "Medium" if tv_imp == 1 else "Low"
-        shaped.append({
-            "date": ev.get("date") or ev.get("scheduled"),
-            "event": ev.get("title") or ev.get("indicator"),
-            "country": (ev.get("country") or "").upper(),
-            "estimate": ev.get("forecast"),
-            "actual": ev.get("actual"),
-            "previous": ev.get("previous"),
-            "change": None,
-            "impact": impact,
-            "_source": "tradingview",
-        })
-    return shaped
-
-
-def _merge_calendar(
-    fmp_events: list[dict[str, Any]],
-    tv_events: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Merge by (date-prefix, event-name) key.
-
-    Prefer whichever entry has a non-null `actual` — TV's calendar often
-    carries released prints earlier than FMP, so letting TV fill that field
-    improves postmortem accuracy. Events without a match carry through.
-    """
-    def _key(ev: dict) -> str:
-        d = (ev.get("date") or "")[:10]  # YYYY-MM-DD prefix
-        name = (ev.get("event") or "").lower().strip()
-        country = (ev.get("country") or "").upper()
-        return f"{d}|{country}|{name}"
-
-    by_key: dict[str, dict[str, Any]] = {}
-    for ev in (*fmp_events, *tv_events):
-        k = _key(ev)
-        existing = by_key.get(k)
-        if existing is None:
-            by_key[k] = dict(ev)
-            continue
-        # Merge: fill null fields from the new one; prefer entry with `actual`
-        merged = dict(existing)
-        for field in ("estimate", "actual", "previous", "change", "impact"):
-            if merged.get(field) in (None, "") and ev.get(field) not in (None, ""):
-                merged[field] = ev.get(field)
-        by_key[k] = merged
-    return sorted(by_key.values(), key=lambda e: e.get("date") or "")
-
-
-def register(
-    mcp: FastMCP,
-    client: AsyncFMPDataClient,
-    *,
-    tv_proxy: TvProxyClient | None = None,
-) -> None:
+def register(mcp: FastMCP, client: AsyncFMPDataClient) -> None:
     def _format_split_value(value) -> str:
         if isinstance(value, float) and value.is_integer():
             return str(int(value))
@@ -419,11 +337,7 @@ def register(
         """Get upcoming high-impact macro-economic events.
 
         Filters for important events (Fed, CPI, NFP, GDP, etc.) and
-        sorts by date. Covers the next N days (default 14). When the
-        TradingView proxy is configured, pulls TV's economic-calendar
-        feed in parallel and merges — TV often carries released
-        `actual` prints earlier than FMP, so postmortem accuracy wins
-        even for past events in the window.
+        sorts by date. Covers the next N days (default 14).
 
         Args:
             days_ahead: Number of days to look ahead (default 14, max 90)
@@ -432,54 +346,20 @@ def register(
         today = date.today()
         end_date = today + timedelta(days=days_ahead)
 
-        fmp_task = asyncio.create_task(_safe_call(
+        data = await _safe_call(
             client.economics.get_economic_calendar,
             start_date=today,
             end_date=end_date,
             ttl=TTL_HOURLY,
             default=[],
-        ))
-        tv_task: asyncio.Task | None = None
-        if tv_proxy is not None:
-            tv_task = asyncio.create_task(
-                _fetch_tv_events(tv_proxy, start=today, end=end_date)
-            )
+        )
 
-        fmp_raw = await fmp_task
-        fmp_events_list = _as_list(fmp_raw)
+        events_list = _as_list(data)
 
-        fmp_events: list[dict] = []
-        for event in fmp_events_list:
-            fmp_events.append({
-                "date": event.get("date"),
-                "event": event.get("event"),
-                "country": (event.get("country") or "").upper(),
-                "estimate": event.get("estimate"),
-                "actual": event.get("actual"),
-                "previous": event.get("previous"),
-                "change": event.get("change"),
-                "impact": event.get("impact"),
-            })
+        if not events_list:
+            return {"events": [], "count": 0, "period": f"{today.isoformat()} to {end_date.isoformat()}"}
 
-        tv_events: list[dict] = []
-        if tv_task is not None:
-            try:
-                tv_events = await tv_task
-            except Exception as e:  # noqa: BLE001
-                logger.debug("TV calendar merge skipped: %s", e)
-
-        merged = _merge_calendar(fmp_events, tv_events)
-
-        if not merged:
-            return {
-                "events": [],
-                "count": 0,
-                "period": f"{today.isoformat()} to {end_date.isoformat()}",
-            }
-
-        # Filter for high-impact events. Keep the existing keyword set
-        # (FMP-style names) but also accept TV's explicit "High" impact
-        # label so we don't drop TV-only high-impact rows.
+        # Filter for high-impact events
         high_impact_keywords = [
             "fed", "fomc", "interest rate", "federal funds",
             "cpi", "consumer price", "inflation",
@@ -495,25 +375,21 @@ def register(
         ]
 
         filtered = []
-        for event in merged:
+        for event in events_list:
             event_name = (event.get("event") or "").lower()
-            country = event.get("country") or ""
-            impact = (event.get("impact") or "").lower()
+            country = (event.get("country") or "").upper()
 
-            # US events (legacy behavior) + any event flagged as high impact
-            # by TV, regardless of country — many relevant macro prints
-            # (ECB, BoJ) don't match the US-keyword list.
-            is_us_keyword = country == "US" and any(
-                kw in event_name for kw in high_impact_keywords
-            )
-            is_tv_high = impact == "high"
-            if not (is_us_keyword or is_tv_high):
+            # Only US events
+            if country != "US":
+                continue
+
+            is_high_impact = any(kw in event_name for kw in high_impact_keywords)
+            if not is_high_impact:
                 continue
 
             filtered.append({
                 "date": event.get("date"),
                 "event": event.get("event"),
-                "country": country or None,
                 "estimate": event.get("estimate"),
                 "actual": event.get("actual"),
                 "previous": event.get("previous"),
@@ -521,11 +397,14 @@ def register(
                 "impact": event.get("impact"),
             })
 
+        # Sort by date ascending
+        filtered.sort(key=lambda x: x.get("date") or "")
+
         return {
             "events": filtered,
             "count": len(filtered),
             "period": f"{today.isoformat()} to {end_date.isoformat()}",
-            "total_unfiltered": len(merged),
+            "total_unfiltered": len(events_list),
         }
 
     @mcp.tool(

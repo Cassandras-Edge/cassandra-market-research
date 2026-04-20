@@ -27,7 +27,7 @@ High-level tools that orchestrate multiple API calls into single research-ready 
 | `financial_statements` | Income statement, balance sheet, cash flow (annual/quarterly) |
 | `analyst_consensus` | Analyst grades, price targets, and forward estimates |
 | `price_history` | Historical daily prices with technical context |
-| `symbol_lookup` / `screener` | Resolve names/identifiers, or run filter-based discovery |
+| `stock_search` | Search for stocks by name or ticker |
 | `insider_activity` | Insider trading activity and transaction statistics |
 | `institutional_ownership` | Top institutional holders and position changes |
 | `stock_news` | Recent news and press releases |
@@ -115,7 +115,7 @@ uv run pytest tests/test_live.py -m live_full -n 4 -q
 server.py          # FastMCP entry point, registers all tool modules
 tools/_helpers.py  # Shared SDK helpers: safe calls, TTL cache, model dumping/normalization
 tools/
-  overview.py      # company_overview, symbol_lookup, screener
+  overview.py      # company_overview, stock_search
   financials.py    # financial_statements, revenue_segments
   valuation.py     # analyst_consensus, peer_comparison, estimate_revisions
   market.py        # price_history, dividends_info, earnings_calendar, etf_lookup

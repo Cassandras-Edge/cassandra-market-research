@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -24,56 +23,6 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
     from fmp_data import AsyncFMPDataClient
     from cassandra_fmp.clients.schwab import SchwabClient
-    from cass_market_sdk.clients.tv_proxy import TvProxyClient
-
-
-logger = logging.getLogger(__name__)
-
-
-async def _tv_name_search(
-    proxy: "TvProxyClient",
-    query: str,
-    *,
-    limit: int = 10,
-) -> list[dict[str, Any]]:
-    """TV symbol-search fallback shaped to FMP's symbol_lookup schema.
-
-    Covers asset classes FMP misses — non-US equities, futures continuations,
-    crypto across exchanges, global indices. Never raises; on any failure
-    returns [] so the caller degrades cleanly.
-    """
-    params: dict[str, Any] = {
-        "text": query,
-        "hl": 1,
-        "lang": "en",
-        "domain": "production",
-    }
-    try:
-        data = await proxy.get_json(
-            "symbol-search", "/symbol_search/v3/", params=params,
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.debug("TV symbol search failed: %s", e)
-        return []
-
-    symbols = data.get("symbols", []) if isinstance(data, dict) else data
-
-    def _strip(s: str) -> str:
-        return s.replace("<em>", "").replace("</em>", "")
-
-    out: list[dict[str, Any]] = []
-    for s in (symbols or [])[:limit]:
-        sym = _strip(s.get("symbol", ""))
-        exch = s.get("exchange") or s.get("source_id") or ""
-        out.append({
-            "symbol": sym,
-            "company_name": s.get("description"),
-            "cik": None,
-            "cusip": None,
-            "exchange": exch or None,
-            "currency": s.get("currency_code"),
-        })
-    return out
 
 
 def _fmp_quote_result(
@@ -108,13 +57,7 @@ def _fmp_quote_result(
     return result
 
 
-def register(
-    mcp: FastMCP,
-    client: AsyncFMPDataClient,
-    *,
-    schwab_client: SchwabClient | None = None,
-    tv_proxy: TvProxyClient | None = None,
-) -> None:
+def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabClient | None = None) -> None:
     @mcp.tool(
         annotations={
             "title": "Quote",
@@ -387,6 +330,131 @@ def register(
         if errors:
             result["_warnings"] = errors
         return result
+
+    @mcp.tool(
+        annotations={
+            "title": "Stock Search",
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        }
+    )
+    async def stock_search(
+        query: str,
+        exchange: str | None = None,
+        sector: str | None = None,
+        market_cap_min: int | None = None,
+        market_cap_max: int | None = None,
+        price_min: float | None = None,
+        price_max: float | None = None,
+        beta_min: float | None = None,
+        beta_max: float | None = None,
+        volume_min: int | None = None,
+        dividend_yield_min: float | None = None,
+        dividend_yield_max: float | None = None,
+        country: str | None = None,
+        is_etf: bool | None = None,
+        is_actively_trading: bool | None = None,
+        limit: int = 20,
+    ) -> dict:
+        """Search for stocks by name or screen by financial criteria.
+
+        Simple text queries search by company name. Adding any filter parameter
+        (sector, market_cap_min, etc.) activates the screener for filtered results.
+
+        Args:
+            query: Company name or keyword to search.
+            exchange: Filter by exchange (e.g. 'NYSE', 'NASDAQ').
+            sector: Filter by sector (e.g. 'Technology', 'Healthcare').
+            market_cap_min: Minimum market cap in dollars.
+            market_cap_max: Maximum market cap in dollars.
+            price_min: Minimum stock price.
+            price_max: Maximum stock price.
+            beta_min: Minimum beta.
+            beta_max: Maximum beta.
+            volume_min: Minimum daily volume.
+            dividend_yield_min: Minimum dividend yield.
+            dividend_yield_max: Maximum dividend yield.
+            country: Filter by country (e.g. 'US', 'GB').
+            is_etf: Filter to ETFs only (True) or exclude ETFs (False).
+            is_actively_trading: Filter to actively trading stocks only.
+            limit: Max results (default 20).
+        """
+        use_screener = any(
+            [
+                exchange,
+                sector,
+                market_cap_min,
+                market_cap_max,
+                price_min,
+                price_max,
+                beta_min,
+                beta_max,
+                volume_min,
+                dividend_yield_min,
+                dividend_yield_max,
+                country,
+                is_etf is not None,
+                is_actively_trading is not None,
+            ]
+        )
+
+        if use_screener:
+            data = await _safe_call(
+                client.market.get_company_screener,
+                market_cap_more_than=market_cap_min,
+                market_cap_less_than=market_cap_max,
+                price_more_than=price_min,
+                price_less_than=price_max,
+                beta_more_than=beta_min,
+                beta_less_than=beta_max,
+                volume_more_than=volume_min,
+                dividend_more_than=dividend_yield_min,
+                dividend_less_than=dividend_yield_max,
+                is_etf=is_etf,
+                is_actively_trading=is_actively_trading,
+                sector=sector,
+                country=country,
+                exchange=exchange,
+                limit=limit,
+                ttl=TTL_HOURLY,
+                default=[],
+            )
+        else:
+            data = await _safe_call(
+                client.market.search_company,
+                query=query,
+                limit=limit,
+                exchange=exchange,
+                ttl=TTL_HOURLY,
+                default=[],
+            )
+
+        rows = _as_list(data)
+        if not rows:
+            return {"results": [], "count": 0}
+
+        results = []
+        for item in rows[:limit]:
+            results.append(
+                {
+                    "symbol": item.get("symbol"),
+                    "name": item.get("companyName") or item.get("name"),
+                    "exchange": item.get("exchangeShortName") or item.get("exchange"),
+                    "sector": item.get("sector"),
+                    "industry": item.get("industry"),
+                    "market_cap": item.get("marketCap"),
+                    "price": item.get("price"),
+                    "beta": item.get("beta"),
+                    "volume": item.get("volume"),
+                    "dividend_yield": item.get("lastAnnualDividend"),
+                    "country": item.get("country"),
+                    "is_etf": item.get("isEtf"),
+                    "is_actively_trading": item.get("isActivelyTrading"),
+                }
+            )
+        return {"results": results, "count": len(results)}
 
     @mcp.tool(
         annotations={
@@ -701,10 +769,7 @@ def register(
         """Look up stock symbols by company name, CIK, or CUSIP.
 
         Resolves identifiers to ticker symbols. Use type='cik' for SEC CIK
-        lookups or type='cusip' for CUSIP lookups. For `type='name'`, falls
-        back to TradingView's catalog when FMP returns nothing — extends
-        coverage to futures continuations (`CL1!`, `ES1!`, `GC1!`), global
-        indices (`DAX`, `JPN225`), non-US equities, and per-exchange crypto.
+        lookups or type='cusip' for CUSIP lookups.
 
         Args:
             query: Search term — company name, CIK number, or CUSIP.
@@ -721,6 +786,8 @@ def register(
                 data = await _safe_call(client.market.search_symbol, query=query, ttl=TTL_DAILY, default=[])
 
         results_list = _as_list(data)
+        if not results_list:
+            return {"error": f"No results found for {type} '{query}'"}
 
         results = []
         for item in results_list:
@@ -734,107 +801,4 @@ def register(
                     "currency": item.get("currency"),
                 }
             )
-
-        # TV fallback for name searches — only when FMP returned nothing.
-        # For CIK/CUSIP lookups TV has no equivalent, so skip.
-        if not results and type_lower == "name" and tv_proxy is not None:
-            try:
-                results = await _tv_name_search(tv_proxy, query, limit=10)
-            except Exception as e:  # noqa: BLE001
-                logger.debug("TV symbol fallback failed: %s", e)
-
-        if not results:
-            return {"error": f"No results found for {type} '{query}'"}
         return {"query": query, "lookup_type": type_lower, "count": len(results), "results": results}
-
-    if tv_proxy is not None:
-        _register_screener(mcp, tv_proxy)
-
-
-_DEFAULT_SCREENER_COLUMNS = [
-    "name", "description", "close", "change", "change_abs",
-    "volume", "market_cap_basic", "price_earnings_ttm",
-    "sector", "industry",
-]
-
-
-def _register_screener(mcp: FastMCP, tv_proxy: TvProxyClient) -> None:
-    """Register the `screener` tool.
-
-    Only registered when the TV proxy is configured — this is the sole
-    filter-based discovery surface in market-research. Accepts arbitrary
-    filter JSON over 200+ TV scanner columns (technicals + fundamentals
-    + dividend + sentiment). Pair with `symbol_lookup` for plain
-    name-based resolution.
-    """
-
-    @mcp.tool(
-        annotations={
-            "title": "Screener",
-            "readOnlyHint": True,
-            "destructiveHint": False,
-            "idempotentHint": True,
-            "openWorldHint": True,
-        }
-    )
-    async def screener(
-        market: str = "america",
-        filters: list[dict[str, Any]] | None = None,
-        *,
-        columns: list[str] | None = None,
-        sort_by: str | None = None,
-        sort_order: str = "desc",
-        range_start: int = 0,
-        range_end: int = 50,
-    ) -> dict:
-        """Arbitrary-filter stock screener (technicals + fundamentals).
-
-        Accepts a filter-clause list combining
-        per-column operators (greater/less/in_range/equal/nempty/in/match)
-        and any of 200+ columns — technicals (`RSI`, `SMA20`, `SMA50`,
-        `MACD.macd`, `ADX`), fundamentals (`price_earnings_ttm`,
-        `price_book_fq`, `dividend_yield_recent`), sentiment, and calendar
-        fields (`earnings_release_next_date`). Useful for pre-screening
-        setups before handing names to `stock_brief` or `fair_value_estimate`.
-        Backed by the TradingView scanner.
-
-        Args:
-            market: Market segment — "america" (US, default), "forex",
-                "crypto", "futures", "bonds", "options", "global".
-            filters: List of clauses. Each clause:
-                `{"left": "<column>", "operation": "<op>", "right": <value>}`.
-                Example: `[{"left": "market_cap_basic", "operation":
-                "greater", "right": 10_000_000_000}]`.
-            columns: Columns per row. Default returns a generic set.
-            sort_by: Column to sort by (default `market_cap_basic`).
-            sort_order: "asc" or "desc" (default "desc").
-            range_start: Pagination offset (default 0).
-            range_end: Exclusive end (default 50, cap 150 per call).
-
-        Returns:
-            `{"total_count", "columns", "rows": [{col: value, ...}]}`.
-        """
-        range_end = min(range_end, range_start + 150)
-        cols = columns or list(_DEFAULT_SCREENER_COLUMNS)
-        body: dict[str, Any] = {
-            "filter": filters or [],
-            "options": {"lang": "en"},
-            "markets": [market],
-            "symbols": {"query": {"types": []}, "tickers": []},
-            "columns": cols,
-            "sort": {
-                "sortBy": sort_by or "market_cap_basic",
-                "sortOrder": sort_order,
-            },
-            "range": [range_start, range_end],
-        }
-        data = await tv_proxy.post_json("scanner", f"/{market}/scan", json=body)
-        rows: list[dict[str, Any]] = []
-        for row in data.get("data", []):
-            values = row.get("d") or []
-            rows.append(dict(zip(cols, values, strict=False)))
-        return {
-            "total_count": data.get("totalCount", len(rows)),
-            "columns": cols,
-            "rows": rows,
-        }

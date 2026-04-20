@@ -16,7 +16,7 @@ from tests.conftest import (
     AAPL_PROFILE, AAPL_QUOTE, AAPL_RATIOS,
     AAPL_INCOME, AAPL_BALANCE, AAPL_CASHFLOW,
     AAPL_PRICE_TARGET, AAPL_GRADES, AAPL_RATING,
-    AAPL_HISTORICAL,
+    AAPL_SEARCH, AAPL_SCREENER, AAPL_HISTORICAL,
     AAPL_ANALYST_ESTIMATES, AAPL_QUARTERLY_INCOME,
     AAPL_INSIDER_TRADES, AAPL_INSIDER_STATS, AAPL_SHARES_FLOAT,
     AAPL_INSTITUTIONAL_SUMMARY, AAPL_INSTITUTIONAL_HOLDERS,
@@ -288,6 +288,40 @@ class TestCompanyOverview:
 
         data = result.data
         assert "error" in data
+        await fmp.aclose()
+
+
+class TestStockSearch:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_name_search(self):
+        respx.get(f"{BASE}/stable/search-name").mock(return_value=httpx.Response(200, json=AAPL_SEARCH))
+
+        mcp, fmp = _make_server(register_overview)
+        async with Client(mcp) as c:
+            result = await c.call_tool("stock_search", {"query": "apple"})
+
+        data = result.data
+        assert data["count"] == 2
+        assert data["results"][0]["symbol"] == "APC.F"
+        await fmp.aclose()
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_screener_search(self):
+        respx.get(f"{BASE}/stable/company-screener").mock(return_value=httpx.Response(200, json=AAPL_SCREENER))
+
+        mcp, fmp = _make_server(register_overview)
+        async with Client(mcp) as c:
+            result = await c.call_tool("stock_search", {
+                "query": "",
+                "sector": "Technology",
+                "market_cap_min": 100000000000,
+            })
+
+        data = result.data
+        assert data["count"] == 2
+        assert data["results"][0]["symbol"] == "NVDA"
         await fmp.aclose()
 
 

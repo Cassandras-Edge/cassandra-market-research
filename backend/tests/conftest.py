@@ -221,6 +221,16 @@ AAPL_RATING = [{
     "priceToBookScore": 1,
 }]
 
+AAPL_SEARCH = [
+    {"symbol": "APC.F", "name": "Apple Inc.", "currency": "EUR", "exchangeFullName": "Frankfurt", "exchange": "FSX"},
+    {"symbol": "AAPL", "name": "Apple Inc.", "currency": "USD", "exchangeFullName": "NASDAQ Global Select", "exchange": "NASDAQ"},
+]
+
+AAPL_SCREENER = [
+    {"symbol": "NVDA", "companyName": "NVIDIA Corporation", "marketCap": 4590383462958, "sector": "Technology", "industry": "Semiconductors", "price": 188.54, "exchangeShortName": "NASDAQ"},
+    {"symbol": "AAPL", "companyName": "Apple Inc.", "marketCap": 4022528102504, "sector": "Technology", "industry": "Consumer Electronics", "price": 273.68, "exchangeShortName": "NASDAQ"},
+]
+
 # /stable/historical-price-eod/full returns flat list (not nested under "historical")
 AAPL_HISTORICAL = [
     {"symbol": "AAPL", "date": "2025-02-11", "open": 228.2, "high": 235.23, "low": 228.13, "close": 232.62, "volume": 53718400},
