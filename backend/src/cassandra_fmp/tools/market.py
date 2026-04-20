@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from cass_market_sdk.clients.polygon import PolygonClient
     from cass_market_sdk.clients.thetadata import ThetaDataClient
     from cass_market_sdk.clients.tv_ws import TvWsClient
+    from cass_market_sdk.clients.tv_proxy import TvProxyClient
 
 
 import logging as _logging
@@ -255,6 +256,63 @@ def _format_exposure(symbol: str, exposure: list, limit: int) -> dict:
     }
 
 
+_TV_SURPRISE_COLUMNS = [
+    "earnings_per_share_fq",
+    "earnings_per_share_forecast_fq",
+    "eps_surprise_fq",
+    "eps_surprise_percent_fq",
+    "revenue_surprise_percent_fq",
+]
+
+
+async def _fetch_tv_earnings_surprise(
+    tv_proxy: "TvProxyClient",
+    symbols: list[str],
+) -> dict[str, dict]:
+    """Pull prior-quarter earnings surprise data from TV's scanner.
+
+    FMP's earnings_calendar doesn't carry actual-vs-estimate history —
+    you'd need a separate `earnings_transcript` call per symbol to
+    reconstruct it. TV's scanner has it inline as
+    `eps_surprise_*_fq` / `revenue_surprise_percent_fq` columns, so we
+    get it in one request.
+
+    Symbol format note: FMP returns bare tickers; TV needs
+    `EXCHANGE:TICKER`. We pass the bare ticker via `symbols.tickers`
+    and TV's scanner handles the lookup within the `america` market.
+    Non-US symbols won't resolve and just come back missing.
+    """
+    if not symbols:
+        return {}
+    # TV scanner accepts both bare tickers and EXCHANGE:TICKER in
+    # symbols.tickers; bare works for US equities in the america market.
+    body = {
+        "filter": [],
+        "options": {"lang": "en"},
+        "markets": ["america"],
+        "symbols": {"query": {"types": []}, "tickers": symbols},
+        "columns": _TV_SURPRISE_COLUMNS,
+        "range": [0, len(symbols)],
+    }
+    data = await tv_proxy.post_json("scanner", "/america/scan", json=body)
+    out: dict[str, dict] = {}
+    for raw in data.get("data") or []:
+        sym_full = raw.get("s") or ""
+        # scanner returns "EXCHANGE:TICKER" in `s`; normalize to bare ticker
+        # so the join-key matches FMP's symbol (which is just the ticker).
+        sym = sym_full.split(":", 1)[-1].upper()
+        values = raw.get("d") or []
+        row = dict(zip(_TV_SURPRISE_COLUMNS, values, strict=False))
+        out[sym] = {
+            "actual_eps": row.get("earnings_per_share_fq"),
+            "estimate_eps": row.get("earnings_per_share_forecast_fq"),
+            "eps_surprise": row.get("eps_surprise_fq"),
+            "eps_surprise_pct": row.get("eps_surprise_percent_fq"),
+            "revenue_surprise_pct": row.get("revenue_surprise_percent_fq"),
+        }
+    return out
+
+
 def register(
     mcp: FastMCP,
     client: AsyncFMPDataClient,
@@ -262,6 +320,7 @@ def register(
     *,
     theta_client: ThetaDataClient | None = None,
     tv_ws: TvWsClient | None = None,
+    tv_proxy: "TvProxyClient | None" = None,
 ) -> None:
     @mcp.tool(
         annotations={
@@ -803,9 +862,27 @@ def register(
         total_matching = len(earnings)
         earnings = earnings[:limit]
 
-        # Enrich with options OI from Polygon (only for the limited set)
+        # Enrich with options OI from Polygon (only for the limited set) and,
+        # in parallel, with prior-quarter earnings surprise from TV's scanner
+        # when TV is configured. TV carries eps/revenue surprise percents as
+        # scanner columns — lets an analyst see "did they beat last quarter
+        # by how much" without a separate fundamentals tool call.
         filtered_symbols = [e["symbol"] for e in earnings]
-        oi_map = await _fetch_options_oi(filtered_symbols)
+        oi_task = asyncio.create_task(_fetch_options_oi(filtered_symbols))
+        tv_surprise_task: asyncio.Task | None = None
+        if tv_proxy is not None and filtered_symbols:
+            tv_surprise_task = asyncio.create_task(
+                _fetch_tv_earnings_surprise(tv_proxy, filtered_symbols)
+            )
+
+        oi_map = await oi_task
+        tv_surprise_map: dict[str, dict] = {}
+        if tv_surprise_task is not None:
+            try:
+                tv_surprise_map = await tv_surprise_task
+            except Exception as e:  # noqa: BLE001
+                _logger.debug("TV earnings surprise enrichment skipped: %s", e)
+
         for entry in earnings:
             sym = entry["symbol"]
             if sym in oi_map:
@@ -820,6 +897,8 @@ def register(
                     "put_open_interest": oi_payload["put_oi"],
                     "put_call_ratio": oi_payload["put_call_ratio"],
                 }
+            if sym in tv_surprise_map:
+                entry["prior_quarter"] = tv_surprise_map[sym]
 
         result = {
             "from_date": today.isoformat(),
