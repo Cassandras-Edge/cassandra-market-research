@@ -22,6 +22,8 @@ from cassandra_mcp_auth import AclMiddleware
 from cass_market_sdk.clients.polygon import PolygonClient
 from cass_market_sdk.clients.thetadata import ThetaDataClient
 from cass_market_sdk.clients.treasury import TreasuryClient
+from cass_market_sdk.clients.tv_proxy import TvProxyClient
+from cass_market_sdk.clients.tv_ws import TvWsClient
 from cassandra_fmp.config import Settings
 from cassandra_fmp.tools import (
     assets,
@@ -117,6 +119,20 @@ def create_mcp_server(settings: Settings) -> FastMCP:
     if settings.theta_terminal_url:
         theta_client = ThetaDataClient(base_url=settings.theta_terminal_url)
 
+    tv_proxy_client: TvProxyClient | None = None
+    if settings.tv_proxy_http_url and settings.tv_proxy_mcp_key:
+        tv_proxy_client = TvProxyClient(
+            base_url=settings.tv_proxy_http_url,
+            mcp_key=settings.tv_proxy_mcp_key,
+        )
+
+    tv_ws_client: TvWsClient | None = None
+    if settings.tv_proxy_ws_url and settings.tv_proxy_mcp_key:
+        tv_ws_client = TvWsClient(
+            ws_url=settings.tv_proxy_ws_url,
+            mcp_key=settings.tv_proxy_mcp_key,
+        )
+
     @asynccontextmanager
     async def lifespan(server):
         yield
@@ -126,6 +142,8 @@ def create_mcp_server(settings: Settings) -> FastMCP:
             await polygon_client.close()
         if theta_client is not None:
             await theta_client.close()
+        if tv_proxy_client is not None:
+            await tv_proxy_client.close()
         if mcp_key_provider is not None:
             mcp_key_provider.close()
 
@@ -202,14 +220,22 @@ def create_mcp_server(settings: Settings) -> FastMCP:
 
         return JSONResponse({"ok": True, "service": "cassandra-fmp"})
 
-    # Register all tool modules
-    overview.register(mcp, client)
+    # Register all tool modules. TV clients are threaded into the tools
+    # where TradingView adds coverage (news mix, economic prints, non-US
+    # symbols, futures continuations) — callers see a single unified tool
+    # surface, not tv_* prefixed variants.
+    overview.register(mcp, client, tv_proxy=tv_proxy_client)
     financials.register(mcp, client)
     valuation.register(mcp, client)
-    market.register(mcp, client, polygon_client=polygon_client, theta_client=theta_client)
+    market.register(
+        mcp, client,
+        polygon_client=polygon_client,
+        theta_client=theta_client,
+        tv_ws=tv_ws_client,
+    )
     ownership.register(mcp, client, polygon_client=polygon_client)
-    news.register(mcp, client)
-    macro.register(mcp, client)
+    news.register(mcp, client, tv_proxy=tv_proxy_client)
+    macro.register(mcp, client, tv_proxy=tv_proxy_client)
     transcripts.register(mcp, client)
     assets.register(mcp, client)
     workflows.register(mcp, client)
@@ -237,7 +263,6 @@ _TOOL_TAGS: dict[str, set[str]] = {
     # overview
     "quote": {"price", "overview"},
     "company_overview": {"overview"},
-    "stock_search": {"overview", "screening"},
     "company_executives": {"overview"},
     "employee_history": {"overview"},
     "delisted_companies": {"overview"},
@@ -328,6 +353,8 @@ _TOOL_TAGS: dict[str, set[str]] = {
     "analyst_consensus": {"earnings", "valuation"},
     # etf
     "etf_lookup": {"overview"},
+    # screener (TV-backed; registered only when TV proxy is configured)
+    "screener": {"screening", "market"},
 }
 
 

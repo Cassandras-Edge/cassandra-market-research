@@ -17,6 +17,9 @@ class Settings:
     workos_client_id: str
     workos_authkit_domain: str
     theta_terminal_url: str
+    tv_proxy_http_url: str
+    tv_proxy_ws_url: str
+    tv_proxy_mcp_key: str
 
 
 def load_settings() -> Settings:
@@ -30,4 +33,7 @@ def load_settings() -> Settings:
         workos_client_id=os.environ.get("WORKOS_CLIENT_ID", ""),
         workos_authkit_domain=os.environ.get("WORKOS_AUTHKIT_DOMAIN", ""),
         theta_terminal_url=os.environ.get("THETA_TERMINAL_URL", ""),
+        tv_proxy_http_url=os.environ.get("TV_PROXY_HTTP_URL", ""),
+        tv_proxy_ws_url=os.environ.get("TV_PROXY_WS_URL", ""),
+        tv_proxy_mcp_key=os.environ.get("TV_PROXY_MCP_KEY", ""),
     )

@@ -32,6 +32,122 @@ if TYPE_CHECKING:
     from fmp_data import AsyncFMPDataClient
     from cass_market_sdk.clients.polygon import PolygonClient
     from cass_market_sdk.clients.thetadata import ThetaDataClient
+    from cass_market_sdk.clients.tv_ws import TvWsClient
+
+
+import logging as _logging
+_logger = _logging.getLogger(__name__)
+
+
+def _looks_like_tv_only(symbol: str) -> bool:
+    """True for symbols FMP definitely can't resolve — futures continuations
+    (`CL1!`), exchange-qualified composites (`NASDAQ:AAPL`,
+    `BINANCE:BTCUSDT`, `COMEX:GC1!`), and anything containing `!` or `:`.
+
+    Used as a fast-path to skip FMP when TV is the only plausible backend.
+    """
+    return ":" in symbol or "!" in symbol
+
+
+def _period_bar_count(period: str) -> int:
+    """Rough daily-bar count for a given period string — sized to give
+    enough history for SMA-200 when possible."""
+    days = PERIOD_DAYS.get(period)
+    if days is None:  # ytd or unknown
+        return 260
+    # Convert calendar days to trading days, floor at 260 so SMAs still work
+    return max(260, int(days * 252 / 365) + 20)
+
+
+def _analysis_from_bars(
+    symbol: str,
+    bars: list[dict],
+    *,
+    detail: bool,
+) -> dict:
+    """Build the same result shape as price_history from TV candle bars.
+
+    Bars are TV's oldest-first `{t, o, h, l, c, v}`; we reverse so reuse of
+    the existing helpers (_calc_performance, _calc_volatility, _calc_sma)
+    stays identical — they assume newest-first.
+    """
+    if not bars:
+        return {"error": f"No price data found for '{symbol}'"}
+
+    rows_newest_first = [
+        {
+            "date": (
+                datetime.fromtimestamp(b["t"], tz=timezone.utc)
+                .date().isoformat()
+            ),
+            "open": b.get("o"),
+            "high": b.get("h"),
+            "low": b.get("l"),
+            "close": b.get("c"),
+            "volume": b.get("v"),
+        }
+        for b in reversed(bars)
+    ]
+    closes = [d["close"] for d in rows_newest_first if d.get("close") is not None]
+    current_price = closes[0] if closes else None
+    year_window = rows_newest_first[:252] if rows_newest_first else []
+    year_high = max((d["high"] for d in year_window if d.get("high") is not None), default=None)
+    year_low = min((d["low"] for d in year_window if d.get("low") is not None), default=None)
+
+    performance = {}
+    for perf_period, days in [("1w", 5), ("1m", 21), ("3m", 63), ("6m", 126), ("1y", 252)]:
+        if current_price:
+            perf = _calc_performance(current_price, rows_newest_first, days)
+            if perf is not None:
+                performance[perf_period] = perf
+
+    result: dict = {
+        "symbol": symbol,
+        "current_price": current_price,
+        "year_high": year_high,
+        "year_low": year_low,
+        "sma_50": _calc_sma(closes, 50),
+        "sma_200": _calc_sma(closes, 200),
+        "performance_pct": performance,
+        "daily_volatility_annualized_pct": _calc_volatility(rows_newest_first),
+        "data_points": len(rows_newest_first),
+        "_source": "tradingview",
+    }
+    if detail:
+        closes_rows = [
+            {"d": d["date"], "c": d["close"], "v": d.get("volume")}
+            for d in rows_newest_first[:30]
+        ]
+        result["recent_closes"] = toon.encode(closes_rows)
+    return result
+
+
+async def _tv_price_history(
+    tv_ws: TvWsClient,
+    symbol: str,
+    *,
+    period: str,
+    detail: bool,
+) -> dict:
+    """Fetch daily bars from TV and synthesize the same shape price_history
+    returns from FMP data. Used as a fallback when FMP has no coverage
+    (futures continuations, global indices, non-US equities)."""
+    count = _period_bar_count(period)
+    try:
+        candles = await tv_ws.get_candles(
+            symbol,
+            timeframe="D",
+            count=count,
+            adjustment="splits",
+            timeout=12.0,
+        )
+    except Exception as e:  # noqa: BLE001
+        _logger.debug("TV candle fallback failed for %s: %s", symbol, e)
+        return {"error": f"No price data found for '{symbol}'"}
+
+    if candles.get("error") and not candles.get("bars"):
+        return {"error": f"No price data found for '{symbol}'"}
+    return _analysis_from_bars(symbol, candles.get("bars") or [], detail=detail)
 
 
 PERIOD_DAYS = {
@@ -145,6 +261,7 @@ def register(
     polygon_client: PolygonClient | None = None,
     *,
     theta_client: ThetaDataClient | None = None,
+    tv_ws: TvWsClient | None = None,
 ) -> None:
     @mcp.tool(
         annotations={
@@ -175,6 +292,13 @@ def register(
         if period not in PERIOD_DAYS:
             return {"error": f"Invalid period '{period}'. Use: {', '.join(PERIOD_DAYS.keys())}"}
 
+        # TV-only symbol shapes (composites, futures) bypass FMP entirely —
+        # saves a wasted roundtrip that we know will return empty.
+        if _looks_like_tv_only(symbol) and tv_ws is not None:
+            return await _tv_price_history(
+                tv_ws, symbol, period=period, detail=detail,
+            )
+
         # Calculate date range
         today = date.today()
         if period == "ytd":
@@ -203,7 +327,12 @@ def register(
         quote = _as_dict(quote_data)
         historical = _as_list(history_data, list_key="historical")
 
+        # FMP miss → try TV for non-US/futures/crypto coverage before erroring.
         if not quote and not historical:
+            if tv_ws is not None:
+                return await _tv_price_history(
+                    tv_ws, symbol, period=period, detail=detail,
+                )
             return {"error": f"No price data found for '{symbol}'"}
 
         current_price = quote.get("price")

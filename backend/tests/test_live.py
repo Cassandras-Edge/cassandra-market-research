@@ -161,7 +161,6 @@ CANONICAL_CASES = [
     ),
     # overview
     _case("company_overview", {"symbol": "AAPL"}, ("symbol", "name", "price")),
-    _case("stock_search", {"query": "apple", "limit": 10}, ("results", "count")),
     _case("company_executives", {"symbol": "AAPL"}, ("symbol", "count", "executives")),
     _case("employee_history", {"symbol": "AAPL"}, ("symbol", "count", "history")),
     _case("delisted_companies", {"limit": 10}, ("count", "companies")),
@@ -359,29 +358,6 @@ async def test_live_market_news_categories(live_server: FastMCP, args: dict[str,
     for key in ("category", "count", "articles"):
         assert key in data
     _assert_list_key(data, "articles")
-
-
-@pytest.mark.asyncio
-@pytest.mark.live_full
-async def test_live_stock_search_modes(live_server: FastMCP) -> None:
-    async with Client(live_server) as c:
-        name_result = await c.call_tool("stock_search", {"query": "apple", "limit": 10})
-        screener_result = await c.call_tool(
-            "stock_search",
-            {
-                "query": "",
-                "sector": "Technology",
-                "market_cap_min": 100_000_000_000,
-                "limit": 10,
-            },
-        )
-
-    for label, payload in (("name-search", name_result.data), ("screener-search", screener_result.data)):
-        assert isinstance(payload, dict), f"{label} response must be dict"
-        assert "error" not in payload, f"{label} returned error: {payload.get('error')}"
-        for key in ("results", "count"):
-            assert key in payload
-        _assert_list_key(payload, "results")
 
 
 @pytest.mark.asyncio

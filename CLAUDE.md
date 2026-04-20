@@ -65,6 +65,9 @@ FMP_API_KEY=<key> THETA_TERMINAL_URL=http://127.0.0.1:25510 uv run cassandra-fmp
 | `AUTH_YAML_PATH` | No | Path to baked-in ACL YAML (default: /app/acl.yaml) |
 | `HOST` | No | Bind address (default: 0.0.0.0) |
 | `MCP_PORT` | No | Port (default: 3003) |
+| `TV_PROXY_HTTP_URL` | No | Base URL for cassandra-tradingview-proxy REST (e.g. `https://tradingview.cassandrasedge.com`). Enables `tv_screener` + `tv_search_symbols`. |
+| `TV_PROXY_WS_URL` | No | Base URL for the proxy's WS relay (e.g. `wss://tradingview.cassandrasedge.com`). Enables `tv_candles`. |
+| `TV_PROXY_MCP_KEY` | No | Service-scoped MCP key for the proxy. Required alongside either URL above. |
 
 ## ThetaData / ThetaTerminal v3
 
@@ -78,7 +81,7 @@ v3's `snapshot/greeks/first_order`, `snapshot/quote`, `snapshot/open_interest`, 
 
 All tools are read-only financial data queries. Each module exports a `register(mcp, client, ...)` function:
 
-- `overview` — quote, company_overview, stock_search, company_executives, sec_filings
+- `overview` — quote, company_overview, company_executives, sec_filings, symbol_lookup, screener (TV-only)
 - `financials` — financial_statements, financial_health, ratio_history
 - `valuation` — valuation_history, discounted_cash_flow, peer_comparison
 - `market` — intraday_prices, price_history, technical_indicators, sector/industry performance
@@ -93,3 +96,15 @@ All tools are read-only financial data queries. Each module exports a `register(
 - `meta` — fmp_coverage_gaps
 - `options` — options_chain, historical_options, historical_option_iv, historical_option_greeks, historical_option_oi, option_quote_at_time (requires ThetaData v3)
 - `economy` — economy_indicators (requires Polygon)
+
+## TradingView integration (merged behind existing tools)
+
+When `TV_PROXY_HTTP_URL`/`TV_PROXY_WS_URL` + `TV_PROXY_MCP_KEY` are set, TV data is threaded into existing tools — **no `tv_*` prefixed variants**. Callers see a single unified surface; the tool picks the backend.
+
+- `market_news` — parallel FMP + TV news-mediator fetch on page 0, deduped by URL/title, sorted by date. TV adds Reuters/Benzinga/MT Newswire which FMP doesn't carry.
+- `economic_calendar` — parallel FMP + TV economic-calendar fetch, merged by `(date, country, event)`. TV often carries released `actual` prints before FMP. High-impact filter expanded from US-keyword-only to include TV-flagged High events (ECB, BoJ, etc.).
+- `symbol_lookup` (name type) — TV fallback when FMP returns nothing. Unlocks futures continuations (`CL1!`), global indices (`DAX`), non-US equities, and per-exchange crypto composites.
+- `price_history` — TV fallback when FMP has no bars *or* when the symbol is an obviously TV-only shape (contains `:` or `!`). Raw OHLCV from TV is reshaped through the same analysis pipeline (SMA-50/200, perf, volatility).
+- `screener` — filter-based stock discovery tool. Arbitrary filter JSON over 200+ TV scanner columns (technicals + fundamentals + dividend / sentiment). Only registered when TV proxy is configured. Pair with `symbol_lookup` for plain name-based resolution.
+
+Account-mutating TV operations (alerts, watchlists) stay in `cassandra-tradingview-mcp` behind its owner-only ACL.
