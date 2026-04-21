@@ -6,6 +6,8 @@ import asyncio
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
+from fastmcp.dependencies import CurrentAccessToken
+from fastmcp.server.auth import AccessToken
 from fmp_data.company.endpoints import DELISTED_COMPANIES
 from cassandra_fmp.tools._helpers import (
     TTL_DAILY,
@@ -58,6 +60,11 @@ def _fmp_quote_result(
 
 
 def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabClient | None = None) -> None:
+    def _get_email(token: AccessToken | None) -> str:
+        if token is None:
+            return ""
+        return token.claims.get("email", "")
+
     @mcp.tool(
         annotations={
             "title": "Quote",
@@ -67,7 +74,7 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabC
             "openWorldHint": True,
         }
     )
-    async def quote(symbol: str) -> dict:
+    async def quote(symbol: str, token: AccessToken = CurrentAccessToken()) -> dict:
         """Get the current price for a stock, including pre-market/after-hours.
 
         Returns the freshest available price across regular session,
@@ -78,10 +85,12 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabC
         """
         symbol = symbol.upper().strip()
 
-        if schwab_client is not None:
+        email = _get_email(token)
+
+        if schwab_client is not None and email:
             # Fire Schwab + FMP concurrently; Schwab for real-time price, FMP for market_cap
             schwab_data, fmp_data = await asyncio.gather(
-                schwab_client.get_quote(symbol),
+                schwab_client.get_quote(email, symbol),
                 _safe_call(client.company.get_quote, symbol=symbol, ttl=TTL_REALTIME, default=None),
             )
             fmp_q = _as_dict(fmp_data)
@@ -131,7 +140,11 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabC
             "openWorldHint": True,
         }
     )
-    async def company_overview(symbol: str, detail: bool = False) -> dict:
+    async def company_overview(
+        symbol: str,
+        detail: bool = False,
+        token: AccessToken = CurrentAccessToken(),
+    ) -> dict:
         """Get company profile, price data, and financial ratios.
 
         Default mode returns quote + most up-to-date price (including
@@ -144,11 +157,13 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabC
         """
         symbol = symbol.upper().strip()
 
+        email = _get_email(token)
+
         if not detail:
             # Lean mode: quote + extended hours for freshest price
-            if schwab_client is not None:
+            if schwab_client is not None and email:
                 schwab_data, fmp_data = await asyncio.gather(
-                    schwab_client.get_quote(symbol),
+                    schwab_client.get_quote(email, symbol),
                     _safe_call(client.company.get_quote, symbol=symbol, ttl=TTL_REALTIME, default=None),
                 )
                 fmp_q = _as_dict(fmp_data)
@@ -226,8 +241,8 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabC
             _safe_call(client.company.get_quote, symbol=symbol, ttl=TTL_REALTIME, default=None),
             _safe_call(client.company.get_financial_ratios_ttm, symbol=symbol, ttl=TTL_HOURLY, default=[]),
         ]
-        if schwab_client is not None:
-            coros.append(schwab_client.get_quote(symbol))
+        if schwab_client is not None and email:
+            coros.append(schwab_client.get_quote(email, symbol))
         else:
             coros.append(_safe_call(client.market.get_pre_post_market, ttl=TTL_REALTIME, default=[]))
             coros.append(_safe_call(client.company.get_aftermarket_trade, symbol=symbol, ttl=TTL_REALTIME, default=None))
@@ -242,7 +257,7 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabC
 
         # Determine price source
         schwab_quote = None
-        if schwab_client is not None:
+        if schwab_client is not None and email:
             schwab_quote = results_list[3] if isinstance(results_list[3], dict) else None
 
         if schwab_quote and schwab_quote.get("mark") is not None:

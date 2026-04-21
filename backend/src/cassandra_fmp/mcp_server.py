@@ -22,6 +22,7 @@ from cassandra_mcp_auth import AclMiddleware
 from cass_market_sdk.clients.polygon import PolygonClient
 from cass_market_sdk.clients.thetadata import ThetaDataClient
 from cass_market_sdk.clients.treasury import TreasuryClient
+from cassandra_fmp.clients.schwab import SchwabClient
 from cassandra_fmp.config import Settings
 from cassandra_fmp.tools import (
     assets,
@@ -117,6 +118,13 @@ def create_mcp_server(settings: Settings) -> FastMCP:
     if settings.theta_terminal_url:
         theta_client = ThetaDataClient(base_url=settings.theta_terminal_url)
 
+    schwab_client: SchwabClient | None = None
+    if settings.schwab_broker_url and settings.schwab_broker_secret:
+        schwab_client = SchwabClient(
+            base_url=settings.schwab_broker_url,
+            broker_secret=settings.schwab_broker_secret,
+        )
+
     @asynccontextmanager
     async def lifespan(server):
         yield
@@ -126,6 +134,8 @@ def create_mcp_server(settings: Settings) -> FastMCP:
             await polygon_client.close()
         if theta_client is not None:
             await theta_client.close()
+        if schwab_client is not None:
+            await schwab_client.close()
         if mcp_key_provider is not None:
             mcp_key_provider.close()
 
@@ -203,7 +213,7 @@ def create_mcp_server(settings: Settings) -> FastMCP:
         return JSONResponse({"ok": True, "service": "cassandra-fmp"})
 
     # Register all tool modules
-    overview.register(mcp, client)
+    overview.register(mcp, client, schwab_client=schwab_client)
     financials.register(mcp, client)
     valuation.register(mcp, client)
     market.register(mcp, client, polygon_client=polygon_client, theta_client=theta_client)
