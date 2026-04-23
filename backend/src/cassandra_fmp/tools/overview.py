@@ -6,8 +6,7 @@ import asyncio
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
-from fastmcp.dependencies import CurrentAccessToken
-from fastmcp.server.auth import AccessToken
+from fastmcp.server.dependencies import get_access_token
 from fmp_data.company.endpoints import DELISTED_COMPANIES
 from cassandra_fmp.tools._helpers import (
     TTL_DAILY,
@@ -60,10 +59,19 @@ def _fmp_quote_result(
 
 
 def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabClient | None = None) -> None:
-    def _get_email(token: AccessToken | None) -> str:
-        if token is None:
+    def _current_email() -> str:
+        """Fetch the caller's email from the current FastMCP access token.
+
+        Returns empty string when no authenticated user is bound (unit tests,
+        unauthenticated probes, CodeMode calls without a carried token).
+        """
+        try:
+            token = get_access_token()
+        except Exception:
             return ""
-        return token.claims.get("email", "")
+        if token is None or not token.claims:
+            return ""
+        return token.claims.get("email", "") or ""
 
     @mcp.tool(
         annotations={
@@ -74,7 +82,7 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabC
             "openWorldHint": True,
         }
     )
-    async def quote(symbol: str, token: AccessToken = CurrentAccessToken()) -> dict:
+    async def quote(symbol: str) -> dict:
         """Get the current price for a stock, including pre-market/after-hours.
 
         Returns the freshest available price across regular session,
@@ -85,7 +93,7 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabC
         """
         symbol = symbol.upper().strip()
 
-        email = _get_email(token)
+        email = _current_email()
 
         if schwab_client is not None and email:
             # Fire Schwab + FMP concurrently; Schwab for real-time price, FMP for market_cap
@@ -143,7 +151,6 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabC
     async def company_overview(
         symbol: str,
         detail: bool = False,
-        token: AccessToken = CurrentAccessToken(),
     ) -> dict:
         """Get company profile, price data, and financial ratios.
 
@@ -157,7 +164,7 @@ def register(mcp: FastMCP, client: AsyncFMPDataClient, *, schwab_client: SchwabC
         """
         symbol = symbol.upper().strip()
 
-        email = _get_email(token)
+        email = _current_email()
 
         if not detail:
             # Lean mode: quote + extended hours for freshest price
