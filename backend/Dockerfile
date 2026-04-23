@@ -13,7 +13,11 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 
 ARG GITHUB_TOKEN=""
-RUN if [ -n "$GITHUB_TOKEN" ]; then printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > /root/.netrc && chmod 600 /root/.netrc; fi \
+# Bump CASSANDRA_AUTH_REV to bust BuildKit's layer cache and force pip
+# to re-resolve `cassandra-mcp-auth @ git+...@main`.
+ARG CASSANDRA_AUTH_REV=fbc8a06
+RUN echo "cassandra-auth-rev=${CASSANDRA_AUTH_REV}" \
+    && if [ -n "$GITHUB_TOKEN" ]; then printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > /root/.netrc && chmod 600 /root/.netrc; fi \
     && pip install --no-cache-dir "." \
     && rm -f /root/.netrc
 
